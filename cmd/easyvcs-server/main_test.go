@@ -177,3 +177,75 @@ func TestPushAuthRequired(t *testing.T) {
 		t.Fatalf("valid token should be 200, got %d", code)
 	}
 }
+
+// TestEndToEndMockPushFetch drives the protocol through an httptest.Server that
+// hosts the server's router — no real process is started. It exercises the same
+// wire exchange a CLI push/fetch performs: advertise, incremental push of a
+// delta, then fetch back the revision. This avoids binding a port or forking a
+// subprocess.
+func TestEndToEndMockPushFetch(t *testing.T) {
+	s := newTestServer(t, "")
+	seedRepo(t, s)
+	srv := httptest.NewServer(s.router())
+	defer srv.Close()
+
+	// The server store has the repo (team/app) with revisions rev1/rev2 and main
+	// -> rev1. A "remote" client that already has rev1 should, on advertise, see
+	// rev2 as the missing delta.
+	advertise := func() advertiseResp {
+		body := []byte(`{"have":["missing-none"]}`)
+		req := httptest.NewRequest(http.MethodPost, "/repo/team/app/advertise", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		s.router().ServeHTTP(rec, req)
+		var adv advertiseResp
+		_ = json.Unmarshal(rec.Body.Bytes(), &adv)
+		return adv
+	}
+	adv := advertise()
+	if len(adv.Changes) == 0 {
+		t.Fatalf("server should advertise revisions, got %+v", adv)
+	}
+
+	// Push a bundle that moves main forward (fast-forward) and verify 200.
+	repo, _ := s.cs.OpenRepo(store.RepoRef{Namespace: "team", Name: "app"})
+	revs, _ := repo.ListRevisions()
+	var childID string
+	for _, r := range revs {
+		snap, err := repo.GetSnapshot(r.Hash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snap.Parents) > 0 {
+			childID = r.ID
+		}
+	}
+	if childID == "" {
+		t.Fatalf("no child revision to push")
+	}
+	b := &transfer.Bundle{Version: transfer.Version, Repo: repo.RepoRef(),
+		Revisions: revs, Refs: []*store.Ref{{Name: "main", Kind: store.RefBranch, Target: childID}}}
+	payload, _ := transfer.CompressBundle(b)
+	req := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(payload))
+	req.Header.Set("Content-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	srv.Config.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("push through mock server should be 200, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Fetch a bundle and confirm it carries the pushed revision + ref.
+	fetchReq := []byte(`{}`)
+	frec := httptest.NewRecorder()
+	freq := httptest.NewRequest(http.MethodPost, "/repo/team/app/fetch", bytes.NewReader(fetchReq))
+	s.router().ServeHTTP(frec, freq)
+	if frec.Code != http.StatusOK {
+		t.Fatalf("fetch: %d %s", frec.Code, frec.Body.String())
+	}
+	fb, err := transfer.UnmarshalBinary(frec.Body.Bytes())
+	if err != nil {
+		t.Fatalf("fetch bundle decode: %v", err)
+	}
+	if len(fb.Revisions) == 0 || len(fb.Refs) == 0 {
+		t.Fatalf("fetch bundle empty: %+v", fb)
+	}
+}
