@@ -14,7 +14,7 @@ import (
 func treeWith(files map[string]string, ws *Workspace) *object.Tree {
 	tree := object.NewTree()
 	for name, content := range files {
-		tree.Entries[name] = object.Entry{Name: name, Kind: object.KindBlob, ID: ws.WriteBlob([]byte(content))}
+		tree.Entries[name] = object.Entry{Name: name, Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte(content))}
 	}
 	return tree
 }
@@ -70,7 +70,7 @@ func TestAmendThenRebaseRecomputesContent(t *testing.T) {
 		ta2 := treeWith(map[string]string{"x.txt": "v2"}, ws)
 		s1, r1, amErr := ws.Commit(CommitParams{
 			RevisionID:  ra.ID,
-			TreeID:      ws.writeTree(ta2),
+			TreeID:      mustWriteTree(ws, ta2),
 			Description: "a2",
 			Author:      store.Author{Name: "t", Email: "t@x"},
 		})

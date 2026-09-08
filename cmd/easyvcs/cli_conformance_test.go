@@ -40,11 +40,11 @@ func TestCLICheckoutAndResolve(t *testing.T) {
 	base := object.BlobID([]byte("base\n"))
 	ours := object.BlobID([]byte("ours\n"))
 	theirs := object.BlobID([]byte("theirs\n"))
-	confID := ws.WriteConflict(object.NewConflictFrom3Way(base, ours, theirs))
+	confID := mustWriteConflict(t, ws, object.NewConflictFrom3Way(base, ours, theirs))
 	// Build a tree holding the conflict and commit it as a revision.
 	confTree := object.NewTree()
 	confTree.Entries["conflict.txt"] = object.Entry{Name: "conflict.txt", Kind: object.KindConflict, ID: confID}
-	cid := ws.WriteTree(confTree)
+	cid := mustWriteTree(t, ws, confTree)
 	snap2, ch2, err := ws.Commit(revision.CommitParams{TreeID: cid, Description: "conf", Author: store.Author{Name: "t"}})
 	if err != nil {
 		t.Fatal(err)

@@ -15,7 +15,7 @@ func seedDropChain(t *testing.T, ws *Workspace) (map[string]*store.Snapshot, map
 	prev := object.ID{}
 	for _, name := range []string{"a", "b", "c", "d", "e"} {
 		tree := object.NewTree()
-		tree.Entries[name+".txt"] = object.Entry{Name: name + ".txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte(name))}
+		tree.Entries[name+".txt"] = object.Entry{Name: name + ".txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte(name))}
 		var parents []object.ID
 		if prev != (object.ID{}) {
 			parents = []object.ID{prev}

@@ -11,7 +11,7 @@ import (
 
 func blobIDOf(t *testing.T, ws *Workspace, data string) object.ID {
 	t.Helper()
-	return ws.WriteBlob([]byte(data))
+	return mustWriteBlob(ws, []byte(data))
 }
 
 // TestMerge3WayConflict verifies the 3-way merge embeds a first-class conflict
@@ -24,20 +24,20 @@ func TestMerge3WayConflict(t *testing.T) {
 		baseTree := object.NewTree()
 		dirTree := object.NewTree()
 		dirTree.Entries["a.txt"] = object.Entry{Name: "a.txt", Kind: object.KindBlob, ID: blobIDOf(t, ws, "base")}
-		baseTree.Entries["dir"] = object.Entry{Name: "dir", Kind: object.KindTree, ID: ws.writeTree(dirTree)}
-		btree := ws.writeTree(baseTree)
+		baseTree.Entries["dir"] = object.Entry{Name: "dir", Kind: object.KindTree, ID: mustWriteTree(ws, dirTree)}
+		btree := mustWriteTree(ws, baseTree)
 
 		oursDir := object.NewTree()
 		oursDir.Entries["a.txt"] = object.Entry{Name: "a.txt", Kind: object.KindBlob, ID: blobIDOf(t, ws, "ours")}
 		ours := object.NewTree()
-		ours.Entries["dir"] = object.Entry{Name: "dir", Kind: object.KindTree, ID: ws.writeTree(oursDir)}
-		oursTree := ws.writeTree(ours)
+		ours.Entries["dir"] = object.Entry{Name: "dir", Kind: object.KindTree, ID: mustWriteTree(ws, oursDir)}
+		oursTree := mustWriteTree(ws, ours)
 
 		theirsDir := object.NewTree()
 		theirsDir.Entries["a.txt"] = object.Entry{Name: "a.txt", Kind: object.KindBlob, ID: blobIDOf(t, ws, "theirs")}
 		theirs := object.NewTree()
-		theirs.Entries["dir"] = object.Entry{Name: "dir", Kind: object.KindTree, ID: ws.writeTree(theirsDir)}
-		theirsTree := ws.writeTree(theirs)
+		theirs.Entries["dir"] = object.Entry{Name: "dir", Kind: object.KindTree, ID: mustWriteTree(ws, theirsDir)}
+		theirsTree := mustWriteTree(ws, theirs)
 
 		merged, atoms, err := ws.Merge(btree, oursTree, theirsTree)
 		if err != nil {
@@ -81,15 +81,15 @@ func TestResolveConflictChangeIDStable(t *testing.T) {
 	runBoth(t, func(t *testing.T, ws *Workspace, dir string) {
 		baseTree := object.NewTree()
 		baseTree.Entries["a.txt"] = object.Entry{Name: "a.txt", Kind: object.KindBlob, ID: blobIDOf(t, ws, "base")}
-		baseTreeID := ws.writeTree(baseTree)
+		baseTreeID := mustWriteTree(ws, baseTree)
 
 		ours := object.NewTree()
 		ours.Entries["a.txt"] = object.Entry{Name: "a.txt", Kind: object.KindBlob, ID: blobIDOf(t, ws, "ours")}
-		oursID := ws.writeTree(ours)
+		oursID := mustWriteTree(ws, ours)
 
 		theirs := object.NewTree()
 		theirs.Entries["a.txt"] = object.Entry{Name: "a.txt", Kind: object.KindBlob, ID: blobIDOf(t, ws, "theirs")}
-		theirsID := ws.writeTree(theirs)
+		theirsID := mustWriteTree(ws, theirs)
 
 		merged, atoms, err := ws.Merge(baseTreeID, oursID, theirsID)
 		if err != nil {
@@ -143,6 +143,6 @@ func contains(s, sub string) bool {
 
 // writeIfLeaf writes a blob if not already present; unused keeps signature.
 func writeIfLeaf(ws *Workspace, id object.ID, data []byte) object.ID {
-	_ = ws.WriteBlob(data)
+	_ = mustWriteBlob(ws, data)
 	return id
 }

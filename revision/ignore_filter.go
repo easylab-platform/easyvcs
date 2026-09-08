@@ -48,7 +48,11 @@ func (w *Workspace) dropIgnored(root string, m *ignore.Matcher, tree *object.Tre
 			filtered.Entries[e.Name] = e
 		}
 	}
-	return w.writeTree(filtered), nil
+	treeID, err := w.writeTree(filtered)
+	if err != nil {
+		return object.ID{}, err
+	}
+	return treeID, nil
 }
 
 // HasIgnoresCompiled checks whether the root has any ignore files; used to

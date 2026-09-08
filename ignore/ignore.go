@@ -155,8 +155,7 @@ func (m *Matcher) HasAnyMatchUnder(dir string) bool {
 // at all (so it can override an outer layer), and whether the path ends up
 // ignored after honoring negation within that file.
 func layerApplies(gi *ignore.GitIgnore, candidate string) (applies, ignored bool) {
-	matched, ip := gi.MatchesPathHow(candidate)
-	_ = ip
+	matched, _ := gi.MatchesPathHow(candidate)
 	if !matched {
 		return false, false
 	}

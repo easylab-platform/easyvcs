@@ -61,7 +61,9 @@ func main() {
 	if err != nil {
 		log.Fatal("open store:", err)
 	}
-	_ = cs.SetWAL()
+	if err := cs.SetWAL(); err != nil {
+		log.Fatal("enable WAL:", err)
+	}
 	s := &server{cs: cs, tokens: buildTokenSet()}
 
 	protocols := new(http.Protocols)
@@ -298,6 +300,8 @@ func writeBundle(w http.ResponseWriter, b *transfer.Bundle) {
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
+	// A write failure while streaming the bundle is best-effort; headers are set
+	// and the client may simply have disconnected.
 	_, _ = w.Write(encoded)
 }
 
@@ -336,6 +340,7 @@ func decodeJSONBody[T any](r *http.Request) (T, error) {
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
+	// Encode errors are best-effort for a response writer (client disconnect).
 	_ = json.NewEncoder(w).Encode(v)
 }
 

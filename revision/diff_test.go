@@ -42,16 +42,16 @@ func TestDiffContentStatus(t *testing.T) {
 	runBoth(t, func(t *testing.T, ws *Workspace, dir string) {
 		// Tree A: one file "f.txt" = "line1\nline2\n"
 		treeA := object.NewTree()
-		treeA.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("line1\nline2\n"))}
-		aID := ws.writeTree(treeA)
+		treeA.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("line1\nline2\n"))}
+		aID := mustWriteTree(ws, treeA)
 
 		// Tree B: same file modified + a new file.
 		treeB := object.NewTree()
 		// Modify the middle line (line2 -> CHANGED), and drop "line2" boundary
 		// semantics so we get a clean 1-del + 1-add.
-		treeB.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("line1\nCHANGED\n"))}
-		treeB.Entries["new.txt"] = object.Entry{Name: "new.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("hello\n"))}
-		bID := ws.writeTree(treeB)
+		treeB.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("line1\nCHANGED\n"))}
+		treeB.Entries["new.txt"] = object.Entry{Name: "new.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("hello\n"))}
+		bID := mustWriteTree(ws, treeB)
 
 		diffs, err := ws.DiffContent(aID, bID)
 		if err != nil {

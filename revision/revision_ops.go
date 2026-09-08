@@ -20,15 +20,19 @@ func joinPath(parent, child string) string {
 	return parent + "/" + child
 }
 
-// writeTree stores a tree object and returns its id.
-func (w *Workspace) writeTree(t *object.Tree) object.ID {
+// writeTree stores a tree object and returns its id. A persistence failure
+// (e.g. an oversized object) is returned as an error so the caller can decide
+// to fail the commit rather than silently reference a non-persisted id.
+func (w *Workspace) writeTree(t *object.Tree) (object.ID, error) {
 	o := &object.Object{Kind: object.KindTree, Tree: t}
-	_ = w.store.WriteObject(o)
-	return o.ID()
+	if err := w.store.WriteObject(o); err != nil {
+		return object.ID{}, err
+	}
+	return o.ID(), nil
 }
 
 // WriteTree stores a tree object and returns its id (exported).
-func (w *Workspace) WriteTree(t *object.Tree) object.ID { return w.writeTree(t) }
+func (w *Workspace) WriteTree(t *object.Tree) (object.ID, error) { return w.writeTree(t) }
 
 // MustTree reads a tree by id, returning an empty tree on error (exported).
 func (w *Workspace) MustTree(id object.ID) *object.Tree { return w.mustTree(id) }
@@ -59,20 +63,25 @@ func (w *Workspace) ReadBlob(id object.ID) ([]byte, error) {
 	return o.Blob, nil
 }
 
-// WriteBlob writes a blob object and returns its id.
-func (w *Workspace) WriteBlob(data []byte) object.ID {
+// WriteBlob writes a blob object and returns its id. A persistence failure is
+// returned as an error rather than silently returning an unreferenced id.
+func (w *Workspace) WriteBlob(data []byte) (object.ID, error) {
 	o := &object.Object{Kind: object.KindBlob, Blob: data}
-	_ = w.store.WriteObject(o)
-	return o.ID()
+	if err := w.store.WriteObject(o); err != nil {
+		return object.ID{}, err
+	}
+	return o.ID(), nil
 }
 
 // treeOps adapter satisfies merge.treeOps.
 
 // WriteConflict implements merge.treeOps.
-func (w *Workspace) WriteConflict(c *object.Conflict) object.ID {
+func (w *Workspace) WriteConflict(c *object.Conflict) (object.ID, error) {
 	o := &object.Object{Kind: object.KindConflict, Conflict: c}
-	_ = w.store.WriteObject(o)
-	return o.ID()
+	if err := w.store.WriteObject(o); err != nil {
+		return object.ID{}, err
+	}
+	return o.ID(), nil
 }
 
 // Rebase repoints a revision onto a single parent, re-creating its snapshot
@@ -158,11 +167,10 @@ func (w *Workspace) RebaseMany(revs []string, onto object.ID) ([]*store.Revision
 	var moved []*store.Revision
 	for _, rid := range revs {
 		// Rebase onto the previous node in the sequence (or the given onto).
-		ns, ch, err := w.Rebase(rid, []object.ID{parent})
+		_, ch, err := w.Rebase(rid, []object.ID{parent})
 		if err != nil {
 			return moved, err
 		}
-		_ = ns
 		moved = append(moved, ch)
 		parent = ch.Hash
 	}
@@ -327,13 +335,22 @@ func revisionHashOf(revID string, w *Workspace) object.ID {
 }
 
 // Merge performs a 3-way merge of the trees of two snapshots, recording any
-// conflicts as first-class objects in the resulting tree.
+// conflicts as first-class objects in the resulting tree. A persistence failure
+// while storing the merged tree (or an embedded conflict object) is returned as
+// an error.
 func (w *Workspace) Merge(base, ours, theirs object.ID) (object.ID, []merge.ConflictAtom, error) {
 	baseTree := w.mustTree(base)
 	oursTree := w.mustTree(ours)
 	theirsTree := w.mustTree(theirs)
-	merged, atoms := merge.Trees(baseTree, oursTree, theirsTree, w)
-	return w.writeTree(merged), atoms, nil
+	merged, atoms, err := merge.Trees(baseTree, oursTree, theirsTree, w)
+	if err != nil {
+		return object.ID{}, nil, err
+	}
+	mergedID, err := w.writeTree(merged)
+	if err != nil {
+		return object.ID{}, nil, err
+	}
+	return mergedID, atoms, nil
 }
 
 // Resolve replaces the conflict at the given path in a revision's current tree
@@ -417,6 +434,8 @@ func (w *Workspace) Resolve(revisionID string, path string, sideIndex int) (*sto
 		}
 		propagated++
 	}
+	// propagated is intentionally retained as an informational count (how many
+	// descendant revisions carried the same conflict) for future diagnostics.
 	_ = propagated
 	return ns, rev, nil
 }
@@ -887,7 +906,11 @@ func (w *Workspace) resolvePath(t *object.Tree, path string, chosen object.ID, r
 		if len(newChild.Entries) == 0 && remove {
 			delete(clone.Entries, name)
 		} else {
-			clone.Entries[name] = object.Entry{Name: name, Kind: object.KindTree, ID: w.writeTree(newChild)}
+			newChildID, err := w.writeTree(newChild)
+			if err != nil {
+				return nil, err
+			}
+			clone.Entries[name] = object.Entry{Name: name, Kind: object.KindTree, ID: newChildID}
 		}
 		return clone, nil
 	}
@@ -895,5 +918,5 @@ func (w *Workspace) resolvePath(t *object.Tree, path string, chosen object.ID, r
 	if err != nil {
 		return object.ID{}, err
 	}
-	return w.writeTree(newTree), nil
+	return w.writeTree(newTree)
 }

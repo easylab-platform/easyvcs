@@ -42,10 +42,10 @@ func TestRewriteHistoryFiltersMatchingAndPrunesEmpty(t *testing.T) {
 	runBoth(t, func(t *testing.T, ws *Workspace, dir string) {
 		// a: root with keep.txt + logs/app.log (both tracked).
 		ta := object.NewTree()
-		ta.Entries["keep.txt"] = object.Entry{Name: "keep.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("keep"))}
+		ta.Entries["keep.txt"] = object.Entry{Name: "keep.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("keep"))}
 		logs := object.NewTree()
-		logs.Entries["app.log"] = object.Entry{Name: "app.log", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("log"))}
-		ta.Entries["logs"] = object.Entry{Name: "logs", Kind: object.KindTree, ID: ws.writeTree(logs)}
+		logs.Entries["app.log"] = object.Entry{Name: "app.log", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("log"))}
+		ta.Entries["logs"] = object.Entry{Name: "logs", Kind: object.KindTree, ID: mustWriteTree(ws, logs)}
 		sa, ra := commitTreeFromTree(t, ws, ta, "a")
 
 		// b: child adds nobody; same tree (link to a's tree for cheap identity).

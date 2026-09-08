@@ -16,13 +16,15 @@ import (
 )
 
 // treeOps is the minimal object access needed by a merge. It is implemented by
-// revision.Workspace, keeping merge independent of the storage backend.
+// revision.Workspace, keeping merge independent of the storage backend. The
+// write methods return an error so a failed persistence (e.g. an oversized
+// blob) is propagated rather than silently dropped.
 type treeOps interface {
 	ReadBlob(id object.ID) ([]byte, error)
 	ReadTree(id object.ID) (*object.Tree, error)
-	WriteBlob(data []byte) object.ID
-	WriteTree(t *object.Tree) object.ID
-	WriteConflict(c *object.Conflict) object.ID
+	WriteBlob(data []byte) (object.ID, error)
+	WriteTree(t *object.Tree) (object.ID, error)
+	WriteConflict(c *object.Conflict) (object.ID, error)
 }
 
 // ConflictAtom is a lightweight record of a conflict location in a merged
@@ -47,8 +49,9 @@ type mergeTerms struct {
 
 // Trees performs a recursive 3-way tree merge. It returns the merged tree
 // (with conflict objects embedded at conflicting paths) and the list of
-// conflict atoms that were produced.
-func Trees(base, ours, theirs *object.Tree, ops treeOps) (*object.Tree, []ConflictAtom) {
+// conflict atoms that were produced. A persistence failure while writing a
+// sub-tree or conflict object is propagated as an error.
+func Trees(base, ours, theirs *object.Tree, ops treeOps) (*object.Tree, []ConflictAtom, error) {
 	merged := object.NewTree()
 	var atoms []ConflictAtom
 
@@ -69,13 +72,16 @@ func Trees(base, ours, theirs *object.Tree, ops treeOps) (*object.Tree, []Confli
 		o := ours.Entries[name]
 		t := theirs.Entries[name]
 
-		entry, subAtoms := mergeEntry(name, b, o, t, ops)
+		entry, subAtoms, err := mergeEntry(name, b, o, t, ops)
+		if err != nil {
+			return nil, nil, err
+		}
 		atoms = append(atoms, subAtoms...)
 		if entry != nil {
 			merged.Entries[name] = *entry
 		}
 	}
-	return merged, atoms
+	return merged, atoms, nil
 }
 
 func blankID() object.ID { var z object.ID; return z }
@@ -88,7 +94,7 @@ func present(e object.Entry) bool { return e.ID != (object.ID{}) }
 
 func isTree(e object.Entry) bool { return e.Kind == object.KindTree }
 
-func mergeEntry(name string, base, ours, theirs object.Entry, ops treeOps) (*object.Entry, []ConflictAtom) {
+func mergeEntry(name string, base, ours, theirs object.Entry, ops treeOps) (*object.Entry, []ConflictAtom, error) {
 	baseTree, baseIsTree := entryAsTree(base, ops)
 	oursTree, oursIsTree := entryAsTree(ours, ops)
 	theirsTree, theirsIsTree := entryAsTree(theirs, ops)
@@ -105,14 +111,21 @@ func mergeEntry(name string, base, ours, theirs object.Entry, ops treeOps) (*obj
 		if tt == nil {
 			tt = object.NewTree()
 		}
-		sub, subAtoms := Trees(bt, ot, tt, ops)
+		sub, subAtoms, err := Trees(bt, ot, tt, ops)
+		if err != nil {
+			return nil, nil, err
+		}
 		for i := range subAtoms {
 			subAtoms[i].Path = joinPath(name, subAtoms[i].Path)
 		}
 		if len(sub.Entries) == 0 {
-			return nil, subAtoms
+			return nil, subAtoms, nil
 		}
-		return &object.Entry{Name: name, Kind: object.KindTree, ID: ops.WriteTree(sub)}, subAtoms
+		subID, err := ops.WriteTree(sub)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &object.Entry{Name: name, Kind: object.KindTree, ID: subID}, subAtoms, nil
 	}
 
 	// Determine presence of each side as a blob (or absent), by non-zero id.
@@ -135,15 +148,15 @@ func mergeEntry(name string, base, ours, theirs object.Entry, ops treeOps) (*obj
 	// Resolve automatically where possible.
 	// Both sides identical.
 	if oursP && theirsP && ours.ID == theirs.ID {
-		return &ours, nil
+		return &ours, nil, nil
 	}
 	// One side unchanged from base.
 	if baseP && oursP && theirsP {
 		if ours.ID == base.ID {
-			return &theirs, nil
+			return &theirs, nil, nil
 		}
 		if theirs.ID == base.ID {
-			return &ours, nil
+			return &ours, nil, nil
 		}
 	}
 	// One side unchanged from base, the other deleted -> take the deletion
@@ -155,22 +168,22 @@ func mergeEntry(name string, base, ours, theirs object.Entry, ops treeOps) (*obj
 	//     (theirs) still holds the base version is dropped too.
 	if baseP {
 		if oursP && !theirsP && ours.ID == base.ID {
-			return nil, nil
+			return nil, nil, nil
 		}
 		if theirsP && !oursP && theirs.ID == base.ID {
-			return nil, nil
+			return nil, nil, nil
 		}
 	}
 	// Added only on one side.
 	if oursP && !theirsP && !baseP {
-		return &ours, nil
+		return &ours, nil, nil
 	}
 	if !oursP && theirsP && !baseP {
-		return &theirs, nil
+		return &theirs, nil, nil
 	}
 	// Deleted on both sides.
 	if !oursP && !theirsP && baseP {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// Otherwise this is a genuine conflict (N-way). Build a conflict object
 	// whose removes = base (if any) and adds = the present ours/theirs terms
@@ -185,7 +198,6 @@ func mergeEntry(name string, base, ours, theirs object.Entry, ops treeOps) (*obj
 	if theirsP {
 		c.Adds = append(c.Adds, object.Term{ID: tv, Label: "theirs"})
 	}
-	conflictID := ops.WriteConflict(c)
 	// Absent side needs an explicit term so resolve can produce a deletion. If a
 	// side is absent, add an absent (zero-id) positive term with that label.
 	if !oursP && !theirsP {
@@ -198,8 +210,11 @@ func mergeEntry(name string, base, ours, theirs object.Entry, ops treeOps) (*obj
 		c.Adds = append(c.Adds, object.Term{ID: absent, Label: "theirs"})
 	}
 	// Recompute id after adding absent-side terms.
-	conflictID = ops.WriteConflict(c)
-	return &object.Entry{Name: name, Kind: object.KindConflict, ID: conflictID}, []ConflictAtom{{Path: name, ID: conflictID}}
+	conflictID, err := ops.WriteConflict(c)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &object.Entry{Name: name, Kind: object.KindConflict, ID: conflictID}, []ConflictAtom{{Path: name, ID: conflictID}}, nil
 }
 
 func joinPath(parent, child string) string {

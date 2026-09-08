@@ -27,15 +27,15 @@ func (f *fakeTreeOps) ReadTree(id object.ID) (*object.Tree, error) {
 	}
 	return t, nil
 }
-func (f *fakeTreeOps) WriteBlob(data []byte) object.ID { return object.BlobID(data) }
-func (f *fakeTreeOps) WriteTree(t *object.Tree) object.ID {
+func (f *fakeTreeOps) WriteBlob(data []byte) (object.ID, error) { return object.BlobID(data), nil }
+func (f *fakeTreeOps) WriteTree(t *object.Tree) (object.ID, error) {
 	// Return the tree's own content id (real), and record it for reads.
 	id := t.ID()
 	f.trees[id.String()] = t
-	return id
+	return id, nil
 }
-func (f *fakeTreeOps) WriteConflict(c *object.Conflict) object.ID {
-	return object.BlobID([]byte("conflict"))
+func (f *fakeTreeOps) WriteConflict(c *object.Conflict) (object.ID, error) {
+	return object.BlobID([]byte("conflict")), nil
 }
 
 func blobEntry(name string, data []byte) object.Entry {
@@ -52,7 +52,7 @@ func TestMergeIdenticalAdds(t *testing.T) {
 	theirs := object.NewTree()
 	ours.Entries["x"] = blobEntry("x", []byte("same"))
 	theirs.Entries["x"] = blobEntry("x", []byte("same"))
-	merged, atoms := Trees(base, ours, theirs, ops)
+	merged, atoms, _ := Trees(base, ours, theirs, ops)
 	if len(atoms) != 0 {
 		t.Fatalf("expected no conflicts, got %d", len(atoms))
 	}
@@ -68,7 +68,7 @@ func TestMergeSingleSideAdd(t *testing.T) {
 	theirs := object.NewTree()
 	ours.Entries["only-ours"] = blobEntry("only-ours", []byte("o"))
 	theirs.Entries["only-theirs"] = blobEntry("only-theirs", []byte("t"))
-	merged, atoms := Trees(base, ours, theirs, ops)
+	merged, atoms, _ := Trees(base, ours, theirs, ops)
 	if len(atoms) != 0 {
 		t.Fatalf("expected no conflicts, got %d", len(atoms))
 	}
@@ -88,7 +88,7 @@ func TestMergeOneSideMatchesBase(t *testing.T) {
 	ours.Entries["x"] = blobEntry("x", []byte("base")) // ours unchanged
 	theirs := object.NewTree()
 	theirs.Entries["x"] = blobEntry("x", []byte("theirs"))
-	merged, atoms := Trees(base, ours, theirs, ops)
+	merged, atoms, _ := Trees(base, ours, theirs, ops)
 	if len(atoms) != 0 {
 		t.Fatalf("expected no conflict, got %d", len(atoms))
 	}
@@ -105,7 +105,7 @@ func TestMergeConflictBothModified(t *testing.T) {
 	ours.Entries["f"] = blobEntry("f", []byte("ours"))
 	theirs := object.NewTree()
 	theirs.Entries["f"] = blobEntry("f", []byte("theirs"))
-	merged, atoms := Trees(base, ours, theirs, ops)
+	merged, atoms, _ := Trees(base, ours, theirs, ops)
 	if len(atoms) != 1 {
 		t.Fatalf("expected 1 conflict, got %d", len(atoms))
 	}
@@ -124,7 +124,7 @@ func TestMergeAddedVsDeleted(t *testing.T) {
 	ours := object.NewTree()   // deletes f
 	theirs := object.NewTree() // modifies f
 	theirs.Entries["f"] = blobEntry("f", []byte("theirs"))
-	merged, atoms := Trees(base, ours, theirs, ops)
+	merged, atoms, _ := Trees(base, ours, theirs, ops)
 	if len(atoms) != 1 {
 		t.Fatalf("expected conflict (delete vs modify), got %d", len(atoms))
 	}
@@ -138,7 +138,7 @@ func TestMergeDeleteBothSides(t *testing.T) {
 	// To simulate deletion on both: entries simply absent in ours and theirs.
 	ours := object.NewTree()
 	theirs := object.NewTree()
-	merged, atoms := Trees(base, ours, theirs, ops)
+	merged, atoms, _ := Trees(base, ours, theirs, ops)
 	if len(atoms) != 0 {
 		t.Fatalf("expected no conflict when both delete, got %d", len(atoms))
 	}
@@ -168,7 +168,7 @@ func TestMergeRecursiveTree(t *testing.T) {
 	theirs.Entries["dir"] = treeEntry("dir", theirsDir)
 	ops.trees[theirsDir.ID().String()] = theirsDir
 
-	merged, atoms := Trees(base, ours, theirs, ops)
+	merged, atoms, _ := Trees(base, ours, theirs, ops)
 	if len(atoms) != 1 {
 		t.Fatalf("expected 1 nested conflict, got %d", len(atoms))
 	}
@@ -196,7 +196,7 @@ func TestMergeConflictNoBase(t *testing.T) {
 	ours.Entries["f"] = blobEntry("f", []byte("o"))
 	theirs := object.NewTree()
 	theirs.Entries["f"] = blobEntry("f", []byte("t"))
-	_, atoms := Trees(base, ours, theirs, ops)
+	_, atoms, _ := Trees(base, ours, theirs, ops)
 	if len(atoms) != 1 {
 		t.Fatalf("expected conflict (both add, different), got %d", len(atoms))
 	}
@@ -210,7 +210,7 @@ func TestMergeAbsentSides(p *testing.T) {
 	theirs := object.NewTree() // delete too -> but base exists so both-delete
 	// Ensure absent handling: both absent -> removed, no conflict already tested.
 	// This test hits the "!oursP && !theirsP && baseP" -> nil.
-	m, atoms := Trees(base, ours, theirs, ops)
+	m, atoms, _ := Trees(base, ours, theirs, ops)
 	if len(atoms) != 0 {
 		p.Fatalf("both delete should be no conflict, got %d", len(atoms))
 	}
@@ -251,7 +251,7 @@ func TestMergeConflictBothAddedDifferentAndPathPrefix(t *testing.T) {
 	theirs.Entries["d"] = treeEntry("d", td)
 	ops.trees[td.ID().String()] = td
 
-	_, atoms := Trees(base, ours, theirs, ops)
+	_, atoms, _ := Trees(base, ours, theirs, ops)
 	if len(atoms) != 1 {
 		t.Fatalf("expected 1 nested conflict, got %d", len(atoms))
 	}

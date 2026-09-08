@@ -152,14 +152,14 @@ func TestFlattenAndCount(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Diff against empty tree -> all added, flattenTree covers nested.
-		added, err := ws.Diff(treeID, ws.writeTree(object.NewTree()))
+		added, err := ws.Diff(treeID, mustWriteTree(ws, object.NewTree()))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(added) != 3 {
 			t.Fatalf("flatten added: %d", len(added))
 		}
-		removed, _ := ws.Diff(ws.writeTree(object.NewTree()), treeID)
+		removed, _ := ws.Diff(mustWriteTree(ws, object.NewTree()), treeID)
 		if len(removed) != 3 {
 			t.Fatalf("flatten removed: %d", len(removed))
 		}
@@ -228,14 +228,14 @@ func TestScanMarkers(t *testing.T) {
 func TestMaterializeConflictToFile(t *testing.T) {
 	runBoth(t, func(t *testing.T, ws *Workspace, dir string) {
 		base := object.NewTree()
-		base.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("base"))}
-		baseID := ws.writeTree(base)
+		base.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("base"))}
+		baseID := mustWriteTree(ws, base)
 		ours := object.NewTree()
-		ours.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("ours"))}
-		oursID := ws.writeTree(ours)
+		ours.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("ours"))}
+		oursID := mustWriteTree(ws, ours)
 		theirs := object.NewTree()
-		theirs.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("theirs"))}
-		theirsID := ws.writeTree(theirs)
+		theirs.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("theirs"))}
+		theirsID := mustWriteTree(ws, theirs)
 		merged, atoms, err := ws.Merge(baseID, oursID, theirsID)
 		if err != nil {
 			t.Fatal(err)

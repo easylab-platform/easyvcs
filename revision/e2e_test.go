@@ -15,18 +15,18 @@ func TestE2E_MultiParentRebaseConflictResolve(t *testing.T) {
 	runBoth(t, func(t *testing.T, ws *Workspace, dir string) {
 		// Base snapshot with file "o.txt" = "base".
 		baseTree := object.NewTree()
-		baseTree.Entries["o.txt"] = object.Entry{Name: "o.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("base"))}
+		baseTree.Entries["o.txt"] = object.Entry{Name: "o.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("base"))}
 		_, baseCh := commitTreeFromTree(t, ws, baseTree, "base")
 		_ = baseCh
 
 		// Divergent "ours": o.txt = "ours".
 		oursTree := object.NewTree()
-		oursTree.Entries["o.txt"] = object.Entry{Name: "o.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("ours"))}
+		oursTree.Entries["o.txt"] = object.Entry{Name: "o.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("ours"))}
 		oursSnap, _ := commitTreeFromTree(t, ws, oursTree, "ours")
 
 		// Divergent "theirs": o.txt = "theirs".
 		theirsTree := object.NewTree()
-		theirsTree.Entries["o.txt"] = object.Entry{Name: "o.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("theirs"))}
+		theirsTree.Entries["o.txt"] = object.Entry{Name: "o.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("theirs"))}
 		theirsSnap, _ := commitTreeFromTree(t, ws, theirsTree, "theirs")
 
 		// Rebase ours revision onto a single new parent (theirs). This is the
@@ -85,21 +85,21 @@ func TestResolvePropagatesToDescendants(t *testing.T) {
 		// Build a conflict at dir/f.txt.
 		baseTree := object.NewTree()
 		dirTree := object.NewTree()
-		dirTree.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("base"))}
-		baseTree.Entries["dir"] = object.Entry{Name: "dir", Kind: object.KindTree, ID: ws.writeTree(dirTree)}
-		baseID := ws.writeTree(baseTree)
+		dirTree.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("base"))}
+		baseTree.Entries["dir"] = object.Entry{Name: "dir", Kind: object.KindTree, ID: mustWriteTree(ws, dirTree)}
+		baseID := mustWriteTree(ws, baseTree)
 
 		oursDir := object.NewTree()
-		oursDir.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("ours"))}
+		oursDir.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("ours"))}
 		ours := object.NewTree()
-		ours.Entries["dir"] = object.Entry{Name: "dir", Kind: object.KindTree, ID: ws.writeTree(oursDir)}
-		oursID := ws.writeTree(ours)
+		ours.Entries["dir"] = object.Entry{Name: "dir", Kind: object.KindTree, ID: mustWriteTree(ws, oursDir)}
+		oursID := mustWriteTree(ws, ours)
 
 		theirsDir := object.NewTree()
-		theirsDir.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("theirs"))}
+		theirsDir.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("theirs"))}
 		theirs := object.NewTree()
-		theirs.Entries["dir"] = object.Entry{Name: "dir", Kind: object.KindTree, ID: ws.writeTree(theirsDir)}
-		theirsID := ws.writeTree(theirs)
+		theirs.Entries["dir"] = object.Entry{Name: "dir", Kind: object.KindTree, ID: mustWriteTree(ws, theirsDir)}
+		theirsID := mustWriteTree(ws, theirs)
 
 		conflictedTree, atoms, err := ws.Merge(baseID, oursID, theirsID)
 		if err != nil {

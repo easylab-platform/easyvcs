@@ -197,6 +197,8 @@ func postJSON(url string, body any, out any, token string) error {
 	if out != nil {
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
+	// Drain the response body so the connection can be reused; a drain error is
+	// non-fatal to the request's outcome and is intentionally not surfaced.
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
@@ -826,11 +828,6 @@ func doPushLocal(repo *store.Repo, rem *store.Remote) error {
 	if err != nil {
 		return err
 	}
-	expected, err := localRemoteRefs(repo, rem.Name)
-	if err != nil {
-		return err
-	}
-	_ = expected
 	incoming := b.Refs
 	conflicts := transfer.CheckNonFastForward(targetRepo, serverRefs, incoming, b)
 	if len(conflicts) > 0 {
@@ -928,8 +925,14 @@ func cmdGitPull(c *ctx) {
 		os.Exit(1)
 	}
 	marker.CurrentRevision = ch.ID
-	_ = store.WriteMarker(".", marker)
-	_ = c.cs.PutWorkspace(&store.WorkspaceRow{Path: ".", Repo: marker.Repo, CurrentRevision: ch.ID, Branch: marker.Branch})
+	if err := store.WriteMarker(".", marker); err != nil {
+		fmt.Fprintln(os.Stderr, "git-pull:", err)
+		os.Exit(1)
+	}
+	if err := c.cs.PutWorkspace(&store.WorkspaceRow{Path: ".", Repo: marker.Repo, CurrentRevision: ch.ID, Branch: marker.Branch}); err != nil {
+		fmt.Fprintln(os.Stderr, "git-pull:", err)
+		os.Exit(1)
+	}
 	fmt.Printf("pulled from git as revision %s -> snapshot %s\n", short(ch.ID), short(snap.RevisionHash.String()))
 }
 
@@ -972,6 +975,7 @@ func cmdGitPush(c *ctx) {
 	}
 
 	work := filepath.Join(os.TempDir(), "easyvcs-gitwork")
+	// Best-effort cleanup of a prior run scratch clone; failure is harmless.
 	_ = os.RemoveAll(work)
 	cmd := exec.Command("git", "clone", "--quiet", gitDest, work)
 	if err := cmd.Run(); err != nil {

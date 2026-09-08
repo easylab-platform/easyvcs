@@ -181,15 +181,15 @@ func TestFullRepoLifecycle(t *testing.T) {
 
 		// ---- Phase 8: conflict (merge two divergent) + resolve ----
 		baseTree := object.NewTree()
-		baseTree.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("base"))}
-		baseTreeID := ws.writeTree(baseTree)
+		baseTree.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("base"))}
+		baseTreeID := mustWriteTree(ws, baseTree)
 
 		oursTree := object.NewTree()
-		oursTree.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("ours"))}
-		oursID := ws.writeTree(oursTree)
+		oursTree.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("ours"))}
+		oursID := mustWriteTree(ws, oursTree)
 		theirsTree := object.NewTree()
-		theirsTree.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("theirs"))}
-		theirsID := ws.writeTree(theirsTree)
+		theirsTree.Entries["f.txt"] = object.Entry{Name: "f.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("theirs"))}
+		theirsID := mustWriteTree(ws, theirsTree)
 
 		mergedTree, atoms, err := ws.Merge(baseTreeID, oursID, theirsID)
 		if err != nil {

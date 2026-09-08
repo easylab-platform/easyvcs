@@ -68,11 +68,11 @@ func TestDescendantsOf(t *testing.T) {
 // TestWriteConflictRoundTrip persists an N-way conflict as a first-class object.
 func TestWriteConflictRoundTrip(t *testing.T) {
 	runBoth(t, func(t *testing.T, ws *Workspace, dir string) {
-		ours := ws.WriteBlob([]byte("ours"))
-		theirs := ws.WriteBlob([]byte("theirs"))
-		base := ws.WriteBlob([]byte("base"))
+		ours := mustWriteBlob(ws, []byte("ours"))
+		theirs := mustWriteBlob(ws, []byte("theirs"))
+		base := mustWriteBlob(ws, []byte("base"))
 		c := object.NewConflictFrom3Way(base, ours, theirs)
-		id := ws.WriteConflict(c)
+		id := mustWriteConflict(ws, c)
 		o, err := ws.store.ReadObject(id)
 		if err != nil {
 			t.Fatal(err)
@@ -92,10 +92,10 @@ func TestWriteConflictRoundTrip(t *testing.T) {
 // TestWriteTreeRoundTrip persists a tree object and reads it back.
 func TestWriteTreeRoundTrip(t *testing.T) {
 	runBoth(t, func(t *testing.T, ws *Workspace, dir string) {
-		blob := ws.WriteBlob([]byte("x"))
+		blob := mustWriteBlob(ws, []byte("x"))
 		tree := object.NewTree()
 		tree.Entries["x.txt"] = object.Entry{Name: "x.txt", Kind: object.KindBlob, ID: blob}
-		id := ws.WriteTree(tree)
+		id := mustWriteTree(ws, tree)
 		got, err := ws.ReadTree(id)
 		if err != nil {
 			t.Fatal(err)
@@ -135,9 +135,9 @@ func TestFindEntry(t *testing.T) {
 // TestDiffContentFromChanges renders unified diffs for add/modify/delete.
 func TestDiffContentFromChanges(t *testing.T) {
 	runBoth(t, func(t *testing.T, ws *Workspace, dir string) {
-		oldBlob := ws.WriteBlob([]byte("line1\n"))
-		rmBlob := ws.WriteBlob([]byte("gone\n"))
-		newBlob := ws.WriteBlob([]byte("line1\nline2\n"))
+		oldBlob := mustWriteBlob(ws, []byte("line1\n"))
+		rmBlob := mustWriteBlob(ws, []byte("gone\n"))
+		newBlob := mustWriteBlob(ws, []byte("line1\nline2\n"))
 
 		changes := []FileChange{
 			{Path: "added.txt", Status: StatusAdded, NewID: newBlob},

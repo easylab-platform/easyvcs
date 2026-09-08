@@ -99,7 +99,11 @@ func (w *Workspace) buildTreeFromFSFiltered(root string, m *ignore.Matcher) (obj
 			}
 			tree.Entries[name] = object.Entry{Name: name, Kind: object.KindBlob, ID: blob.ID()}
 		}
-		return w.writeTree(tree), nil
+		treeID, err := w.writeTree(tree)
+		if err != nil {
+			return object.ID{}, err
+		}
+		return treeID, nil
 	}
 	return walk(root, "")
 }

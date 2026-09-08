@@ -130,7 +130,10 @@ func (a *API) ensureRepo(w http.ResponseWriter, r *http.Request) {
 		Org  string `json:"org"`
 		Repo string `json:"repo"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		badReq(w)
+		return
+	}
 	if body.Org == "" || body.Repo == "" {
 		badReq(w)
 		return
@@ -155,7 +158,10 @@ func (a *API) forkRepo(w http.ResponseWriter, r *http.Request) {
 		NewOrg  string `json:"new_org"`
 		NewName string `json:"new_name"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		badReq(w)
+		return
+	}
 	if body.Org == "" || body.Repo == "" || body.NewName == "" {
 		badReq(w)
 		return
@@ -238,6 +244,8 @@ func (a *API) fsRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
+	// A write failure to the client is best-effort for a blob fetch; the
+	// response header is already set and there is nothing else to do.
 	_, _ = w.Write(data)
 }
 
@@ -272,7 +280,10 @@ func (a *API) deployments(w http.ResponseWriter, r *http.Request) {
 func (a *API) imageBuild(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var body map[string]any
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		badReq(w)
+		return
+	}
 	// Forward to easylab /api/v1/ops/builds (buildah). Return its build id.
 	code, b, err := a.upstreamClient().post(ctx, "/api/v1/ops/builds", body)
 	if err != nil {
@@ -284,6 +295,8 @@ func (a *API) imageBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var out map[string]any
+	// The build id response is best-effort to parse; if it is not JSON we
+	// forward an empty body rather than failing the proxy call.
 	_ = json.Unmarshal(b, &out)
 	writeJSON(w, out)
 }
@@ -309,6 +322,8 @@ func (a *API) buildStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
+	// Stream errors while proxying an SSE back-channel are best-effort; the
+	// response has already been committed, so we can only drop the remaining body.
 	_ = writeStream(w, resp)
 }
 
@@ -391,6 +406,8 @@ func badReq(w http.ResponseWriter) {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	// Encode errors (e.g. a broken client connection) are best-effort for a
+	// response writer; the handler has already decided its status.
 	_ = json.NewEncoder(w).Encode(v)
 }
 
@@ -432,6 +449,8 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request, target string) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
+	// Stream errors while proxying an SSE back-channel are best-effort; the
+	// response has already been committed, so we can only drop the remaining body.
 	_ = writeStream(w, resp)
 }
 

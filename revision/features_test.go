@@ -63,7 +63,7 @@ func commitTree(t *testing.T, ws *Workspace, dir string, desc string, parents []
 // is written to the store first so downstream reads succeed.
 func commitTreeFromTree(t *testing.T, ws *Workspace, tree *object.Tree, desc string) (*store.Snapshot, *store.Revision) {
 	t.Helper()
-	treeID := ws.writeTree(tree)
+	treeID := mustWriteTree(ws, tree)
 	snap, ch, err := ws.Commit(CommitParams{
 		TreeID:      treeID,
 		Description: desc,

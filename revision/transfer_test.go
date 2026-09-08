@@ -32,11 +32,11 @@ func TestTransferCollectApplyRoundTrip(t *testing.T) {
 	defer csA.Close()
 	// Seed repoA with two changes and a ref.
 	baseTree := object.NewTree()
-	baseTree.Entries["a.txt"] = object.Entry{Name: "a.txt", Kind: object.KindBlob, ID: wsA.WriteBlob([]byte("one"))}
+	baseTree.Entries["a.txt"] = object.Entry{Name: "a.txt", Kind: object.KindBlob, ID: mustWriteBlob(wsA, []byte("one"))}
 	_, baseCh := commitTreeFromTree(t, wsA, baseTree, "first")
 	tree2 := object.NewTree()
-	tree2.Entries["a.txt"] = object.Entry{Name: "a.txt", Kind: object.KindBlob, ID: wsA.WriteBlob([]byte("two"))}
-	tree2.Entries["b.txt"] = object.Entry{Name: "b.txt", Kind: object.KindBlob, ID: wsA.WriteBlob([]byte("two"))}
+	tree2.Entries["a.txt"] = object.Entry{Name: "a.txt", Kind: object.KindBlob, ID: mustWriteBlob(wsA, []byte("two"))}
+	tree2.Entries["b.txt"] = object.Entry{Name: "b.txt", Kind: object.KindBlob, ID: mustWriteBlob(wsA, []byte("two"))}
 	_, err := wsA.SetRef("main", store.RefBranch, baseCh.ID)
 	if err != nil {
 		t.Fatal(err)

@@ -132,7 +132,7 @@ func Pull(ctx context.Context, repo *store.Repo, cfg PullConfig) (*store.Revisio
 		}
 	}
 
-	snap, rev, err := ws.Commit(revision.CommitParams{
+	_, rev, err := ws.Commit(revision.CommitParams{
 		Parents:     parents,
 		TreeID:      treeID,
 		Description: "mirror pull from " + cfg.URL,
@@ -141,7 +141,6 @@ func Pull(ctx context.Context, repo *store.Repo, cfg PullConfig) (*store.Revisio
 	if err != nil {
 		return nil, err
 	}
-	_ = snap
 
 	// Point the mirror's branch to the new revision.
 	if err := repo.PutRef(&store.Ref{Name: cfg.Branch, Kind: store.RefBranch, Target: rev.ID}); err != nil {

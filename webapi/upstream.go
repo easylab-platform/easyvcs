@@ -77,6 +77,8 @@ func (u *upstream) services(ctx context.Context) ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Non-200 status is not actionable for an aggregate mapping pass; the body
+	// is still decoded below so callers can surface a partial/empty result.
 	_ = code
 	var list []map[string]any
 	if err := json.Unmarshal(b, &list); err != nil {

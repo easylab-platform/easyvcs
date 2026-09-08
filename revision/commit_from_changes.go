@@ -78,7 +78,10 @@ func (w *Workspace) CommitFromChanges(parentHash object.ID, changes []FileChange
 			newTree = w.mustTree(tid)
 			continue
 		}
-		blobID := w.WriteBlob(c.Content)
+		blobID, err := w.WriteBlob(c.Content)
+		if err != nil {
+			return nil, nil, err
+		}
 		tid, err := w.resolvePath(newTree, c.Path, blobID, false)
 		if err != nil {
 			return nil, nil, err
@@ -86,10 +89,14 @@ func (w *Workspace) CommitFromChanges(parentHash object.ID, changes []FileChange
 		newTree = w.mustTree(tid)
 	}
 
+	treeID, err := w.writeTree(newTree)
+	if err != nil {
+		return nil, nil, err
+	}
 	snap := &store.Snapshot{
 		RevisionID:  revisionID,
 		Parents:     parents,
-		TreeID:      w.writeTree(newTree),
+		TreeID:      treeID,
 		Description: description,
 		Author:      author,
 		CommitTime:  time.Now().UTC(),

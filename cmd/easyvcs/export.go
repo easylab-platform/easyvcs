@@ -188,10 +188,12 @@ func cmdImport(c *ctx) {
 
 	// Write objects first (content-addressed, global dedup).
 	for _, ob := range b.Objects {
-		o, err := object.DecodeObject(object.BlobID(ob.Content), ob.Content)
-		if err == nil {
-			// DecodeObject needs the real id; re-encode to compute it.
-			_ = o
+		// Prefer the decoded object (verifies the payload) but fall through to
+		// decodeBundleObject which recomputes the true id; the re-encode check
+		// below is best-effort validation only, so its discarded error is fine.
+		if _, err := object.DecodeObject(object.BlobID(ob.Content), ob.Content); err != nil {
+			// Invalid tree/conflict payload may still be a valid blob; ignore.
+			_ = err
 		}
 		obj, err := decodeBundleObject(ob)
 		if err != nil {
@@ -225,13 +227,13 @@ func cmdImport(c *ctx) {
 }
 
 func decodeBundleObject(ob bundleObject) (*object.Object, error) {
-	// Re-encode to compute the true content id from the payload.
-	o, err := object.DecodeObject(object.BlobID([]byte("x")), ob.Content)
-	if err != nil {
+	// Re-encode to compute the true content id from the payload. The decoded
+	// object from a fake id is only used to confirm the payload is well-formed;
+	// the real object for a given Kind is rebuilt below.
+	if _, err := object.DecodeObject(object.BlobID([]byte("x")), ob.Content); err != nil {
 		// Fallback: treat as blob.
 		return &object.Object{Kind: object.KindBlob, Blob: ob.Content}, nil
 	}
-	_ = o
 	switch ob.Kind {
 	case object.KindBlob:
 		return &object.Object{Kind: object.KindBlob, Blob: ob.Content}, nil

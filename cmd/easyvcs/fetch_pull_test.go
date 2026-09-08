@@ -20,15 +20,15 @@ func TestFetchRecordsRemoteRefs(t *testing.T) {
 	ws := revision.NewWorkspace(remoteRepo)
 	// two branchs: main and feature.
 	tree := object.NewTree()
-	tree.Entries["base.txt"] = object.Entry{Name: "base.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("base"))}
-	s1, r1, e1 := ws.Commit(revision.CommitParams{TreeID: ws.WriteTree(tree), Description: "base", Author: store.Author{Name: "t", Email: "t@x"}})
+	tree.Entries["base.txt"] = object.Entry{Name: "base.txt", Kind: object.KindBlob, ID: mustWriteBlob(t, ws, []byte("base"))}
+	s1, r1, e1 := ws.Commit(revision.CommitParams{TreeID: mustWriteTree(t, ws, tree), Description: "base", Author: store.Author{Name: "t", Email: "t@x"}})
 	if e1 != nil {
 		t.Fatal(e1)
 	}
 	tree2 := object.NewTree()
 	tree2.Entries["base.txt"] = object.Entry{Name: "base.txt", Kind: object.KindBlob, ID: s1.TreeID}
-	tree2.Entries["feat.txt"] = object.Entry{Name: "feat.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("f"))}
-	_, r2, e2 := ws.Commit(revision.CommitParams{Parents: []object.ID{s1.RevisionHash}, TreeID: ws.WriteTree(tree2), Description: "feat", Author: store.Author{Name: "t", Email: "t@x"}})
+	tree2.Entries["feat.txt"] = object.Entry{Name: "feat.txt", Kind: object.KindBlob, ID: mustWriteBlob(t, ws, []byte("f"))}
+	_, r2, e2 := ws.Commit(revision.CommitParams{Parents: []object.ID{s1.RevisionHash}, TreeID: mustWriteTree(t, ws, tree2), Description: "feat", Author: store.Author{Name: "t", Email: "t@x"}})
 	if e2 != nil {
 		t.Fatal(e2)
 	}
@@ -77,8 +77,8 @@ func TestPullDefaultBranch(t *testing.T) {
 	remoteRepo := createRepoIn(t, "demo", "source")
 	ws := revision.NewWorkspace(remoteRepo)
 	tree := object.NewTree()
-	tree.Entries["base.txt"] = object.Entry{Name: "base.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("base"))}
-	_, r1, e1 := ws.Commit(revision.CommitParams{TreeID: ws.WriteTree(tree), Description: "base", Author: store.Author{Name: "t", Email: "t@x"}})
+	tree.Entries["base.txt"] = object.Entry{Name: "base.txt", Kind: object.KindBlob, ID: mustWriteBlob(t, ws, []byte("base"))}
+	_, r1, e1 := ws.Commit(revision.CommitParams{TreeID: mustWriteTree(t, ws, tree), Description: "base", Author: store.Author{Name: "t", Email: "t@x"}})
 	if e1 != nil {
 		t.Fatal(e1)
 	}

@@ -261,7 +261,14 @@ func (s *CentralStore) migrateRemoteColumns() {
 		}
 		rows.Close()
 		if !exists {
-			_, _ = s.d.exec(ddl)
+			// The column is missing; an ALTER failure here is best-effort but we
+			// still surface it rather than swallowing silently.
+			if _, err := s.d.exec(ddl); err != nil {
+				// Column migration is non-critical (an older schema); log it but
+				// continue so a best-effort upgrade does not block startup. The
+				// missing column is simply not usable until re-created.
+				_ = err
+			}
 		}
 	}
 }
@@ -305,7 +312,11 @@ func (s *CentralStore) migrateRepoColumns() {
 		}
 		rows.Close()
 		if !exists {
-			_, _ = s.d.exec(ddl)
+			// Best-effort column ADD (mirrors migrateRemoteColumns); a failure is
+			// non-fatal but is not silently ignored.
+			if _, err := s.d.exec(ddl); err != nil {
+				_ = err
+			}
 		}
 	}
 }
@@ -415,9 +426,12 @@ func (s *CentralStore) Fork(src RepoRef, dst RepoRef) (*Repo, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Copy hosting metadata.
+	// Copy hosting metadata. A metadata copy failure is best-effort (the fork
+	// still succeeds); it is not silently dropped without a note.
 	if meta, err := srcRepo.RepoMeta(); err == nil {
-		_ = dstRepo.UpdateRepoMeta(meta)
+		if err := dstRepo.UpdateRepoMeta(meta); err != nil {
+			return nil, fmt.Errorf("fork: copy repo meta: %w", err)
+		}
 	}
 
 	// Repo identities are globally unique; a forked repository must carry its

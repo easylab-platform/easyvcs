@@ -30,7 +30,7 @@ func TestMergeEntryReadTreeBroken(t *testing.T) {
 	base.Entries["d"] = object.Entry{Name: "d", Kind: object.KindTree, ID: object.BlobID([]byte("missing"))}
 	ours := object.NewTree()
 	theirs := object.NewTree()
-	_, _ = Trees(base, ours, theirs, ops)
+	_, _, _ = Trees(base, ours, theirs, ops)
 }
 
 func TestMergeConflictDeleteVsModifyTheirsModifies(t *testing.T) {
@@ -40,7 +40,7 @@ func TestMergeConflictDeleteVsModifyTheirsModifies(t *testing.T) {
 	ours := object.NewTree() // deletes f
 	theirs := object.NewTree()
 	theirs.Entries["f"] = blobEntry("f", []byte("theirs")) // modifies f
-	_, atoms := Trees(base, ours, theirs, ops)
+	_, atoms, _ := Trees(base, ours, theirs, ops)
 	if len(atoms) != 1 {
 		t.Fatalf("expected 1 conflict, got %d", len(atoms))
 	}

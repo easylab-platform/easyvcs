@@ -75,15 +75,15 @@ func TestCollaborativePullMergesRemoteFirstTime(t *testing.T) {
 	ws := revision.NewWorkspace(remoteRepo)
 	// commit base + feat on remote, then branch feature.
 	tree := object.NewTree()
-	tree.Entries["base.txt"] = object.Entry{Name: "base.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("base"))}
-	s1, r1, errc := ws.Commit(revision.CommitParams{TreeID: ws.WriteTree(tree), Description: "base", Author: store.Author{Name: "t", Email: "t@x"}})
+	tree.Entries["base.txt"] = object.Entry{Name: "base.txt", Kind: object.KindBlob, ID: mustWriteBlob(t, ws, []byte("base"))}
+	s1, r1, errc := ws.Commit(revision.CommitParams{TreeID: mustWriteTree(t, ws, tree), Description: "base", Author: store.Author{Name: "t", Email: "t@x"}})
 	if errc != nil {
 		t.Fatal(errc)
 	}
 	tree2 := object.NewTree()
-	tree2.Entries["base.txt"] = object.Entry{Name: "base.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("base"))}
-	tree2.Entries["feat.txt"] = object.Entry{Name: "feat.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("feature-work"))}
-	_, r2, errb := ws.Commit(revision.CommitParams{Parents: []object.ID{s1.RevisionHash}, TreeID: ws.WriteTree(tree2), Description: "feat", Author: store.Author{Name: "t", Email: "t@x"}})
+	tree2.Entries["base.txt"] = object.Entry{Name: "base.txt", Kind: object.KindBlob, ID: mustWriteBlob(t, ws, []byte("base"))}
+	tree2.Entries["feat.txt"] = object.Entry{Name: "feat.txt", Kind: object.KindBlob, ID: mustWriteBlob(t, ws, []byte("feature-work"))}
+	_, r2, errb := ws.Commit(revision.CommitParams{Parents: []object.ID{s1.RevisionHash}, TreeID: mustWriteTree(t, ws, tree2), Description: "feat", Author: store.Author{Name: "t", Email: "t@x"}})
 	if errb != nil {
 		t.Fatal(errb)
 	}
@@ -103,9 +103,9 @@ func TestCollaborativePullMergesRemoteFirstTime(t *testing.T) {
 	lws := revision.NewWorkspace(localRepo)
 	// Local has a divergent tip on main: base.txt modified.
 	lt := object.NewTree()
-	lt.Entries["base.txt"] = object.Entry{Name: "base.txt", Kind: object.KindBlob, ID: lws.WriteBlob([]byte("base-local"))}
-	lt.Entries["local.txt"] = object.Entry{Name: "local.txt", Kind: object.KindBlob, ID: lws.WriteBlob([]byte("local-work"))}
-	ls, lr, errl := lws.Commit(revision.CommitParams{TreeID: lws.WriteTree(lt), Description: "local", Author: store.Author{Name: "t", Email: "t@x"}})
+	lt.Entries["base.txt"] = object.Entry{Name: "base.txt", Kind: object.KindBlob, ID: mustWriteBlob(t, lws, []byte("base-local"))}
+	lt.Entries["local.txt"] = object.Entry{Name: "local.txt", Kind: object.KindBlob, ID: mustWriteBlob(t, lws, []byte("local-work"))}
+	ls, lr, errl := lws.Commit(revision.CommitParams{TreeID: mustWriteTree(t, lws, lt), Description: "local", Author: store.Author{Name: "t", Email: "t@x"}})
 	if errl != nil {
 		t.Fatal(errl)
 	}

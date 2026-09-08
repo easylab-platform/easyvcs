@@ -93,26 +93,26 @@ func TestRebaseManyMovesSequence(t *testing.T) {
 	runBoth(t, func(t *testing.T, ws *Workspace, dir string) {
 		// Build explicit trees so we can track exact contents.
 		treeM := object.NewTree()
-		treeM.Entries["m.txt"] = object.Entry{Name: "m.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("m"))}
+		treeM.Entries["m.txt"] = object.Entry{Name: "m.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("m"))}
 		_, ra := commitTreeFromTree(t, ws, treeM, "a")
 		_ = ra
 
 		treeB := object.NewTree()
-		treeB.Entries["m.txt"] = object.Entry{Name: "m.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("m"))}
-		treeB.Entries["m2.txt"] = object.Entry{Name: "m2.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("m2"))}
+		treeB.Entries["m.txt"] = object.Entry{Name: "m.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("m"))}
+		treeB.Entries["m2.txt"] = object.Entry{Name: "m2.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("m2"))}
 		sb, rb := commitTreeFromTree(t, ws, treeB, "b")
 
 		// feature: b -> d -> g -> h (g is the one to drop).
 		treeD := object.NewTree()
-		treeD.Entries["d.txt"] = object.Entry{Name: "d.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("d"))}
+		treeD.Entries["d.txt"] = object.Entry{Name: "d.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("d"))}
 		sd, rd := commitTreeAt(t, ws, treeD, "d", []object.ID{sb.RevisionHash})
 
 		treeG := object.NewTree()
-		treeG.Entries["g.txt"] = object.Entry{Name: "g.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("g"))}
+		treeG.Entries["g.txt"] = object.Entry{Name: "g.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("g"))}
 		sg, _ := commitTreeAt(t, ws, treeG, "g", []object.ID{sd.RevisionHash})
 
 		treeH := object.NewTree()
-		treeH.Entries["h.txt"] = object.Entry{Name: "h.txt", Kind: object.KindBlob, ID: ws.WriteBlob([]byte("h"))}
+		treeH.Entries["h.txt"] = object.Entry{Name: "h.txt", Kind: object.KindBlob, ID: mustWriteBlob(ws, []byte("h"))}
 		sh, rh := commitTreeAt(t, ws, treeH, "h", []object.ID{sg.RevisionHash})
 		_ = sh
 
@@ -186,7 +186,7 @@ func commitTreeAt(t *testing.T, ws *Workspace, tree *object.Tree, desc string, p
 	t.Helper()
 	snap, ch, err := ws.Commit(CommitParams{
 		Parents:     parents,
-		TreeID:      ws.writeTree(tree),
+		TreeID:      mustWriteTree(ws, tree),
 		Description: desc,
 		Author:      store.Author{Name: "t", Email: "t@x"},
 	})

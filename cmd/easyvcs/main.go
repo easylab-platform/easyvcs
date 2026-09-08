@@ -101,7 +101,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "open store:", err)
 		os.Exit(1)
 	}
-	_ = cs.SetWAL()
+	if err := cs.SetWAL(); err != nil {
+		fmt.Fprintln(os.Stderr, "enable WAL:", err)
+		os.Exit(1)
+	}
 	c := &ctx{cs: cs}
 
 	switch cmd {
@@ -479,7 +482,7 @@ func cmdWorkspaceAttach(c *ctx) {
 			}
 			// New revision on top of the repo tip (first branch or root).
 			parents := repoTip(repo)
-			snap, ch, err := ws.Commit(revision.CommitParams{
+			_, ch, err := ws.Commit(revision.CommitParams{
 				Parents:     parents,
 				TreeID:      treeID,
 				Description: "fork",
@@ -490,12 +493,11 @@ func cmdWorkspaceAttach(c *ctx) {
 				os.Exit(1)
 			}
 			marker.CurrentRevision = ch.ID
-			_ = snap
 			if err := store.WriteMarker(".", marker); err != nil {
 				fmt.Fprintln(os.Stderr, "workspace attach:", err)
 				os.Exit(1)
 			}
-			fmt.Printf("forked new revision %s -> snapshot %s\n", short(ch.ID), short(snap.RevisionHash.String()))
+			fmt.Printf("forked new revision %s\n", short(ch.ID))
 		}
 	}
 	if err := c.cs.PutWorkspace(&store.WorkspaceRow{
@@ -610,7 +612,10 @@ func cmdCommit(c *ctx) {
 		fmt.Fprintln(os.Stderr, "commit:", err)
 		os.Exit(1)
 	}
-	_ = c.cs.PutWorkspace(&store.WorkspaceRow{Path: ".", Repo: marker.Repo, CurrentRevision: ch.ID, Branch: marker.Branch})
+	if err := c.cs.PutWorkspace(&store.WorkspaceRow{Path: ".", Repo: marker.Repo, CurrentRevision: ch.ID, Branch: marker.Branch}); err != nil {
+		fmt.Fprintln(os.Stderr, "commit: record workspace:", err)
+		os.Exit(1)
+	}
 }
 
 // applyIgnoreRewrite checks whether ignore rules changed; if so it removes
@@ -690,7 +695,6 @@ func cmdAmend(c *ctx) {
 		fmt.Fprintln(os.Stderr, "amend:", err)
 		os.Exit(1)
 	}
-	_ = ns
 	fmt.Printf("amended revision %s -> snapshot %s\n", short(ch.ID), short(ns.RevisionHash.String()))
 }
 
@@ -810,8 +814,14 @@ func cmdCheckout(c *ctx) {
 	}
 	// Checkout repoints the workspace's current_change only (does not touch db).
 	marker.CurrentRevision = snap.RevisionID
-	_ = store.WriteMarker(".", marker)
-	_ = c.cs.PutWorkspace(&store.WorkspaceRow{Path: ".", Repo: marker.Repo, CurrentRevision: snap.RevisionID, Branch: marker.Branch})
+	if err := store.WriteMarker(".", marker); err != nil {
+		fmt.Fprintln(os.Stderr, "checkout:", err)
+		os.Exit(1)
+	}
+	if err := c.cs.PutWorkspace(&store.WorkspaceRow{Path: ".", Repo: marker.Repo, CurrentRevision: snap.RevisionID, Branch: marker.Branch}); err != nil {
+		fmt.Fprintln(os.Stderr, "checkout:", err)
+		os.Exit(1)
+	}
 	fmt.Printf("checked out snapshot %s (revision %s)\n", short(id.String()), short(snap.RevisionID))
 }
 
@@ -959,12 +969,11 @@ func cmdBranch(c *ctx) {
 		// Branch already exists and owns its derived target: no-op.
 		target = cur.Target
 	} else {
-		ns, ch, err2 := ws.Derive(revisionID, message, autoCommit)
+		_, ch, err2 := ws.Derive(revisionID, message, autoCommit)
 		if err2 != nil {
 			fmt.Fprintln(os.Stderr, "branch:", err2)
 			os.Exit(1)
 		}
-		_ = ns
 		target = ch.ID
 	}
 	r, err := ws.SetRef(name, store.RefBranch, target)

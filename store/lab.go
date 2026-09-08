@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -420,9 +421,11 @@ func (r *Repo) UpdateMirrorMeta(m RepoMeta) error {
 func (s *CentralStore) CreateMergeRequest(repoID int64, mr *MergeRequest) (*MergeRequest, error) {
 	now := time.Now().UTC().UnixMilli()
 	var iid int64
-	_ = s.d.queryRow(
+	if err := s.d.queryRow(
 		"SELECT COALESCE(MAX(iid),0)+1 FROM merge_requests WHERE repo_id=?", repoID,
-	).Scan(&iid)
+	).Scan(&iid); err != nil {
+		return nil, fmt.Errorf("assign MR iid: %w", err)
+	}
 	res, err := s.d.exec(
 		`INSERT INTO merge_requests(repo_id, iid, title, description, source, target, state, author_id, created, updated)
 		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
