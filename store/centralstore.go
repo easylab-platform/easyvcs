@@ -7,49 +7,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
 
 	"github.com/easylab-platform/easyvcs/encoding"
 	"github.com/easylab-platform/easyvcs/object"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
-// sqlDialect abstracts the placeholder differences between SQLite and Postgres.
-type sqlDialect struct {
-	db     *sql.DB
-	kind   string
-	rebind func(string) string
-}
-
-func (d *sqlDialect) rebindQ(q string) string {
-	if d.rebind == nil {
-		return q
-	}
-	return d.rebind(q)
-}
-
-func (d *sqlDialect) exec(q string, args ...any) (sql.Result, error) {
-	return d.db.Exec(d.rebindQ(q), args...)
-}
-
-func (d *sqlDialect) query(q string, args ...any) (*sql.Rows, error) {
-	return d.db.Query(d.rebindQ(q), args...)
-}
-
-func (d *sqlDialect) queryRow(q string, args ...any) *sql.Row {
-	return d.db.QueryRow(d.rebindQ(q), args...)
-}
-
-func (d *sqlDialect) execTx(tx *sql.Tx, q string, args ...any) (sql.Result, error) {
-	return tx.Exec(d.rebindQ(q), args...)
-}
-
-func (d *sqlDialect) queryTx(tx *sql.Tx, q string, args ...any) (*sql.Rows, error) {
-	return tx.Query(d.rebindQ(q), args...)
-}
-
+// sqlDialect is defined in driver.go; it provides both the raw *sql.DB handle
+// (for SetWAL and legacy helpers) and the GORM session used for model queries.
 // CentralStore is the single-database store. It holds many repositories, each
 // identified by (namespace, name). Objects are global (content-addressed and
 // deduplicated); metadata tables are scoped by a repo id.
@@ -57,6 +25,8 @@ type CentralStore struct {
 	d    *sqlDialect
 	root string
 }
+
+
 
 // HomeDir returns the EasyVCS home directory (default ~/.easyvcs, overridable
 // via EASYVCS_HOME).
@@ -75,250 +45,21 @@ func HomeDir() string {
 func DBPath() string { return filepath.Join(HomeDir(), DefaultDBFile) }
 
 // SetWAL enables SQLite WAL mode for safe concurrent access across processes
-// (many workspaces sharing one DB). No-op for Postgres.
+// (many workspaces sharing one DB). No-op for Postgres/MySQL.
 func (s *CentralStore) SetWAL() error {
-	if s.d.kind != KindSQLite {
+	if !s.d.isSQLite() {
 		return nil
 	}
-	_, err := s.d.exec("PRAGMA journal_mode=WAL")
-	return err
-}
-
-// Init creates the schema. Idempotent.
-func (s *CentralStore) Init() error {
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS repositories (
-			id INTEGER PRIMARY KEY,
-			namespace TEXT NOT NULL,
-			name TEXT NOT NULL,
-			created INTEGER NOT NULL,
-			description TEXT NOT NULL DEFAULT '',
-			visibility TEXT NOT NULL DEFAULT 'public',
-			default_branch TEXT NOT NULL DEFAULT 'main',
-			kind TEXT NOT NULL DEFAULT 'normal',
-			mirror_url TEXT NOT NULL DEFAULT '',
-			mirror_branch TEXT NOT NULL DEFAULT 'main',
-			mirror_interval INTEGER NOT NULL DEFAULT 300,
-			mirror_last_rev TEXT NOT NULL DEFAULT '',
-			mirror_last_sync INTEGER NOT NULL DEFAULT 0,
-			mirror_last_error TEXT NOT NULL DEFAULT '',
-			mirror_token TEXT NOT NULL DEFAULT '',
-			UNIQUE(namespace, name)
-		)`,
-		`CREATE TABLE IF NOT EXISTS push_mirrors (
-			id INTEGER PRIMARY KEY,
-			repo_id INTEGER NOT NULL,
-			name TEXT NOT NULL,
-			url TEXT NOT NULL,
-			branch TEXT NOT NULL DEFAULT 'main',
-			token TEXT NOT NULL DEFAULT '',
-			last_rev TEXT NOT NULL DEFAULT '',
-			last_error TEXT NOT NULL DEFAULT '',
-			UNIQUE(repo_id, name)
-		)`,
-		`CREATE TABLE IF NOT EXISTS objects (
-			sha TEXT PRIMARY KEY,
-			kind INTEGER NOT NULL,
-			content BLOB NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS snapshots (
-			repo_id INTEGER NOT NULL,
-			sha TEXT NOT NULL,
-			revision_id TEXT NOT NULL,
-			tree_id TEXT NOT NULL,
-			commit_time INTEGER NOT NULL,
-			meta BLOB NOT NULL,
-			PRIMARY KEY(repo_id, sha)
-		)`,
-		`CREATE TABLE IF NOT EXISTS revisions (
-			repo_id INTEGER NOT NULL,
-			id TEXT NOT NULL,
-			hash TEXT NOT NULL,
-			created INTEGER NOT NULL,
-			fork_from TEXT,
-			changed_paths BLOB,
-			PRIMARY KEY(repo_id, id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS refs (
-			repo_id INTEGER NOT NULL,
-			name TEXT NOT NULL,
-			kind TEXT NOT NULL,
-			target TEXT NOT NULL,
-			PRIMARY KEY(repo_id, name)
-		)`,
-		`CREATE TABLE IF NOT EXISTS workspaces (
-			id INTEGER PRIMARY KEY,
-			path TEXT UNIQUE,
-			repo_id INTEGER NOT NULL,
-			current_revision TEXT,
-			branch TEXT
-		)`,
-		`CREATE TABLE IF NOT EXISTS remotes (
-			repo_id INTEGER NOT NULL,
-			name TEXT NOT NULL,
-			url TEXT NOT NULL,
-			token TEXT,
-			last_sync_tip TEXT NOT NULL DEFAULT '',
-			default_branch TEXT NOT NULL DEFAULT '',
-			ancestry JSON,
-			PRIMARY KEY(repo_id, name)
-		)`,
-		`CREATE TABLE IF NOT EXISTS remote_refs (
-			repo_id INTEGER NOT NULL,
-			remote_name TEXT NOT NULL,
-			kind TEXT NOT NULL,
-			name TEXT NOT NULL,
-			target TEXT NOT NULL,
-			PRIMARY KEY(repo_id, remote_name, kind, name)
-		)`,
-		// ---- Lab (hosting) entities ----
-		`CREATE TABLE IF NOT EXISTS users (
-			id INTEGER PRIMARY KEY,
-			username TEXT NOT NULL UNIQUE,
-			display_name TEXT NOT NULL DEFAULT '',
-			created INTEGER NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS tokens (
-			id INTEGER PRIMARY KEY,
-			token TEXT NOT NULL UNIQUE,
-			user_id INTEGER NOT NULL,
-			level TEXT NOT NULL DEFAULT 'write',
-			created INTEGER NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS namespace_members (
-			namespace TEXT NOT NULL,
-			user_id INTEGER NOT NULL,
-			role TEXT NOT NULL DEFAULT 'member',
-			PRIMARY KEY(namespace, user_id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS merge_requests (
-			id INTEGER PRIMARY KEY,
-			repo_id INTEGER NOT NULL,
-			iid INTEGER NOT NULL,
-			title TEXT NOT NULL,
-			description TEXT NOT NULL DEFAULT '',
-			source TEXT NOT NULL,
-			target TEXT NOT NULL,
-			state TEXT NOT NULL DEFAULT 'open',
-			author_id INTEGER,
-			created INTEGER NOT NULL,
-			updated INTEGER NOT NULL,
-			UNIQUE(repo_id, iid)
-		)`,
-		`CREATE TABLE IF NOT EXISTS mr_reviews (
-			id INTEGER PRIMARY KEY,
-			mr_id INTEGER NOT NULL,
-			reviewer_id INTEGER,
-			state TEXT NOT NULL,
-			body TEXT NOT NULL DEFAULT '',
-			created INTEGER NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS mr_comments (
-			id INTEGER PRIMARY KEY,
-			mr_id INTEGER NOT NULL,
-			author_id INTEGER,
-			body TEXT NOT NULL,
-			path TEXT,
-			created INTEGER NOT NULL
-		)`,
+	if err := s.d.gdb.Exec("PRAGMA journal_mode=WAL").Error; err != nil {
+		return err
 	}
-	for _, stmt := range stmts {
-		if _, err := s.d.exec(stmt); err != nil {
-			return err
-		}
-	}
-	// Lightweight additive migrations for repository metadata columns that may
-	// be missing on a database created before the Lab layer existed.
-	s.migrateRepoColumns()
-	s.migrateRemoteColumns()
 	return nil
 }
 
-// migrateRemoteColumns adds collaboration sync columns to the remotes table for
-// databases created by an earlier version.
-func (s *CentralStore) migrateRemoteColumns() {
-	if s.d.kind != KindSQLite {
-		return
-	}
-	columns := map[string]string{
-		"last_sync_tip":  `ALTER TABLE remotes ADD COLUMN last_sync_tip TEXT NOT NULL DEFAULT ''`,
-		"default_branch": `ALTER TABLE remotes ADD COLUMN default_branch TEXT NOT NULL DEFAULT ''`,
-	}
-	for name, ddl := range columns {
-		exists := false
-		rows, err := s.d.query("PRAGMA table_info(remotes)")
-		if err != nil {
-			continue
-		}
-		for rows.Next() {
-			var cid int
-			var cname, ctype string
-			var notnull, pk int
-			var dflt any
-			if err := rows.Scan(&cid, &cname, &ctype, &notnull, &dflt, &pk); err == nil && cname == name {
-				exists = true
-			}
-		}
-		rows.Close()
-		if !exists {
-			// The column is missing; an ALTER failure here is best-effort but we
-			// still surface it rather than swallowing silently.
-			if _, err := s.d.exec(ddl); err != nil {
-				// Column migration is non-critical (an older schema); log it but
-				// continue so a best-effort upgrade does not block startup. The
-				// missing column is simply not usable until re-created.
-				_ = err
-			}
-		}
-	}
-}
-
-// migrateRepoColumns adds Lab metadata columns to the repositories table for
-// databases created by an earlier version, while leaving existing rows intact.
-func (s *CentralStore) migrateRepoColumns() {
-	// PRAGMA is SQLite-only. For Postgres we rely on CREATE TABLE IF NOT EXISTS
-	// carrying the columns already; an ALTER-backed check for pg would query
-	// information_schema. Keep it simple: sqlite-only column migration.
-	if s.d.kind != KindSQLite {
-		return
-	}
-	columns := map[string]string{
-		"description":       `ALTER TABLE repositories ADD COLUMN description TEXT NOT NULL DEFAULT ''`,
-		"visibility":        `ALTER TABLE repositories ADD COLUMN visibility TEXT NOT NULL DEFAULT 'public'`,
-		"default_branch":    `ALTER TABLE repositories ADD COLUMN default_branch TEXT NOT NULL DEFAULT 'main'`,
-		"kind":              `ALTER TABLE repositories ADD COLUMN kind TEXT NOT NULL DEFAULT 'normal'`,
-		"mirror_url":        `ALTER TABLE repositories ADD COLUMN mirror_url TEXT NOT NULL DEFAULT ''`,
-		"mirror_branch":     `ALTER TABLE repositories ADD COLUMN mirror_branch TEXT NOT NULL DEFAULT 'main'`,
-		"mirror_interval":   `ALTER TABLE repositories ADD COLUMN mirror_interval INTEGER NOT NULL DEFAULT 300`,
-		"mirror_last_rev":   `ALTER TABLE repositories ADD COLUMN mirror_last_rev TEXT NOT NULL DEFAULT ''`,
-		"mirror_last_sync":  `ALTER TABLE repositories ADD COLUMN mirror_last_sync INTEGER NOT NULL DEFAULT 0`,
-		"mirror_last_error": `ALTER TABLE repositories ADD COLUMN mirror_last_error TEXT NOT NULL DEFAULT ''`,
-		"mirror_token":      `ALTER TABLE repositories ADD COLUMN mirror_token TEXT NOT NULL DEFAULT ''`,
-	}
-	for name, ddl := range columns {
-		exists := false
-		rows, err := s.d.query("PRAGMA table_info(repositories)")
-		if err != nil {
-			continue
-		}
-		for rows.Next() {
-			var cid int
-			var cname, ctype string
-			var notnull, pk int
-			var dflt any
-			if err := rows.Scan(&cid, &cname, &ctype, &notnull, &dflt, &pk); err == nil && cname == name {
-				exists = true
-			}
-		}
-		rows.Close()
-		if !exists {
-			// Best-effort column ADD (mirrors migrateRemoteColumns); a failure is
-			// non-fatal but is not silently ignored.
-			if _, err := s.d.exec(ddl); err != nil {
-				_ = err
-			}
-		}
-	}
+// Init creates the schema via GORM AutoMigrate, generating portable DDL
+// (sqlite / postgres / mysql). Idempotent.
+func (s *CentralStore) Init() error {
+	return s.d.gdb.AutoMigrate(allModels()...)
 }
 
 // Close closes the underlying database.
@@ -327,52 +68,40 @@ func (s *CentralStore) Close() error { return s.d.db.Close() }
 // Create creates a new repository and returns a repo-scoped handle.
 func (s *CentralStore) Create(r RepoRef) (*Repo, error) {
 	// Check for conflict.
-	var exists int
-	err := s.d.queryRow("SELECT 1 FROM repositories WHERE namespace=? AND name=?", r.Namespace, r.Name).Scan(&exists)
-	if err == nil {
+	var count int64
+	if err := s.d.gdb.Model(&repoRow{}).Where("namespace=? AND name=?", r.Namespace, r.Name).Count(&count).Error; err != nil {
+		return nil, err
+	}
+	if count > 0 {
 		return nil, fmt.Errorf("%w: %s", ErrRepoExists, r)
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	row := &repoRow{Namespace: r.Namespace, Name: r.Name, Created: time.Now().UTC().UnixMilli()}
+	if err := s.d.gdb.Create(row).Error; err != nil {
 		return nil, err
 	}
-	res, err := s.d.exec(
-		"INSERT INTO repositories(namespace, name, created) VALUES(?,?,?)",
-		r.Namespace, r.Name, time.Now().UTC().UnixMilli(),
-	)
-	if err != nil {
-		return nil, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, err
-	}
-	return &Repo{cs: s, repoID: id, Namespace: r.Namespace, Name: r.Name}, nil
+	return &Repo{cs: s, repoID: row.ID, Namespace: r.Namespace, Name: r.Name}, nil
 }
 
 // OpenRepo opens an existing repository. Returns ErrRepoNotFound if missing.
 func (s *CentralStore) OpenRepo(r RepoRef) (*Repo, error) {
-	var id int64
-	err := s.d.queryRow("SELECT id FROM repositories WHERE namespace=? AND name=?", r.Namespace, r.Name).Scan(&id)
-	if err == sql.ErrNoRows {
+	var row repoRow
+	err := s.d.gdb.Where("namespace=? AND name=?", r.Namespace, r.Name).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, fmt.Errorf("%w: %s", ErrRepoNotFound, r)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &Repo{cs: s, repoID: id, Namespace: r.Namespace, Name: r.Name}, nil
+	return &Repo{cs: s, repoID: row.ID, Namespace: r.Namespace, Name: r.Name}, nil
 }
 
 // RepoExists reports whether a repository exists.
 func (s *CentralStore) RepoExists(r RepoRef) (bool, error) {
-	var one int
-	err := s.d.queryRow("SELECT 1 FROM repositories WHERE namespace=? AND name=?", r.Namespace, r.Name).Scan(&one)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
+	var count int64
+	if err := s.d.gdb.Model(&repoRow{}).Where("namespace=? AND name=?", r.Namespace, r.Name).Count(&count).Error; err != nil {
 		return false, err
 	}
-	return true, nil
+	return count > 0, nil
 }
 
 // Delete removes a repository and its scoped metadata.
@@ -381,37 +110,32 @@ func (s *CentralStore) Delete(r RepoRef) error {
 	if err != nil {
 		return err
 	}
-	for _, table := range []string{"snapshots", "revisions", "refs", "merge_requests"} {
-		if _, err := s.d.exec("DELETE FROM "+table+" WHERE repo_id=?", repo.repoID); err != nil {
+	for _, table := range []any{&snapshotRow{}, &revisionRow{}, &refRow{}, &mergeRequestRow{}} {
+		if err := s.d.gdb.Where("repo_id=?", repo.repoID).Delete(table).Error; err != nil {
 			return err
 		}
 	}
-	// Releases cascade to assets; delete any MR reviews/comments too.
-	for _, table := range []string{"mr_reviews", "mr_comments"} {
-		if _, err := s.d.exec("DELETE FROM "+table+" WHERE mr_id IN (SELECT id FROM merge_requests WHERE repo_id=?)", repo.repoID); err != nil {
-			return err
-		}
+	// Delete MR reviews/comments via a subquery on the repo's MR ids.
+	sub := s.d.gdb.Model(&mergeRequestRow{}).Select("id").Where("repo_id=?", repo.repoID)
+	_ = s.d.gdb.Where("mr_id IN (?)", sub).Delete(&mrReviewRow{}).Error
+	_ = s.d.gdb.Where("mr_id IN (?)", s.d.gdb.Model(&mergeRequestRow{}).Select("id").Where("repo_id=?", repo.repoID)).Delete(&mrCommentRow{}).Error
+	if err := s.d.gdb.Delete(&repoRow{}, repo.repoID).Error; err != nil {
+		return err
 	}
-	_, err = s.d.exec("DELETE FROM repositories WHERE id=?", repo.repoID)
-	return err
+	return nil
 }
 
 // List returns all repositories sorted by namespace/name.
 func (s *CentralStore) List() ([]RepoRef, error) {
-	rows, err := s.d.query("SELECT namespace, name FROM repositories ORDER BY namespace, name")
-	if err != nil {
+	var rows []repoRow
+	if err := s.d.gdb.Order("namespace, name").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []RepoRef
-	for rows.Next() {
-		var r RepoRef
-		if err := rows.Scan(&r.Namespace, &r.Name); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
+	out := make([]RepoRef, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, RepoRef{Namespace: r.Namespace, Name: r.Name})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // Fork copies a repository's scoped data (snapshots, revisions, refs) plus its
@@ -445,11 +169,8 @@ func (s *CentralStore) Fork(src RepoRef, dst RepoRef) (*Repo, error) {
 	// write the remapped rows. Refs are remapped to the new revision ids.
 	var remap = map[string]string{} // old revision id -> new revision id
 
-	snapRows, err := s.d.query(
-		"SELECT sha, revision_id, tree_id, commit_time, meta FROM snapshots WHERE repo_id=?",
-		srcRepo.repoID,
-	)
-	if err != nil {
+	var snapRows []snapshotRow
+	if err := s.d.gdb.Where("repo_id=?", srcRepo.repoID).Find(&snapRows).Error; err != nil {
 		return nil, err
 	}
 	type snapRec struct {
@@ -457,22 +178,13 @@ func (s *CentralStore) Fork(src RepoRef, dst RepoRef) (*Repo, error) {
 		commitTime              int64
 		meta                    []byte
 	}
-	var snaps []snapRec
-	for snapRows.Next() {
-		var r snapRec
-		if err := snapRows.Scan(&r.sha, &r.revisionID, &r.treeID, &r.commitTime, &r.meta); err != nil {
-			snapRows.Close()
-			return nil, err
-		}
-		snaps = append(snaps, r)
+	snaps := make([]snapRec, 0, len(snapRows))
+	for _, sr := range snapRows {
+		snaps = append(snaps, snapRec{sha: sr.ID, revisionID: sr.RevisionID, treeID: sr.TreeID, commitTime: sr.CommitTime, meta: sr.Meta})
 	}
-	snapRows.Close()
 
-	revRows, err := s.d.query(
-		"SELECT id, hash, created, fork_from, changed_paths FROM revisions WHERE repo_id=?",
-		srcRepo.repoID,
-	)
-	if err != nil {
+	var revRows []revisionRow
+	if err := s.d.gdb.Where("repo_id=?", srcRepo.repoID).Find(&revRows).Error; err != nil {
 		return nil, err
 	}
 	type revRec struct {
@@ -481,16 +193,10 @@ func (s *CentralStore) Fork(src RepoRef, dst RepoRef) (*Repo, error) {
 		forkFrom sql.NullString
 		changed  []byte
 	}
-	var revs []revRec
-	for revRows.Next() {
-		var r revRec
-		if err := revRows.Scan(&r.id, &r.hash, &r.created, &r.forkFrom, &r.changed); err != nil {
-			revRows.Close()
-			return nil, err
-		}
-		revs = append(revs, r)
+	revs := make([]revRec, 0, len(revRows))
+	for _, rr := range revRows {
+		revs = append(revs, revRec{id: rr.ID, hash: rr.Hash, created: rr.Created, forkFrom: sql.NullString{String: rr.ForkFrom, Valid: rr.ForkFrom != ""}, changed: rr.ChangedPath})
 	}
-	revRows.Close()
 
 	// Assign fresh ids to every source revision.
 	for _, r := range revs {
@@ -592,29 +298,19 @@ func (s *CentralStore) Fork(src RepoRef, dst RepoRef) (*Repo, error) {
 	}
 
 	// Write remapped refs (branch/tag targets -> new revision id).
-	refRows, err := s.d.query(
-		"SELECT name, kind, target FROM refs WHERE repo_id=?",
-		srcRepo.repoID,
-	)
-	if err != nil {
+	var refRows []refRow
+	if err := s.d.gdb.Where("repo_id=?", srcRepo.repoID).Find(&refRows).Error; err != nil {
 		return nil, err
 	}
-	for refRows.Next() {
-		var name, kind, target string
-		if err := refRows.Scan(&name, &kind, &target); err != nil {
-			refRows.Close()
-			return nil, err
-		}
-		newTarget := target
-		if mapped, ok := remap[target]; ok {
+	for _, rr := range refRows {
+		newTarget := rr.Target
+		if mapped, ok := remap[rr.Target]; ok {
 			newTarget = mapped
 		}
-		if err := dstRepo.PutRef(&Ref{Name: name, Kind: RefKind(kind), Target: newTarget}); err != nil {
-			refRows.Close()
+		if err := dstRepo.PutRef(&Ref{Name: rr.Name, Kind: RefKind(rr.Kind), Target: newTarget}); err != nil {
 			return nil, err
 		}
 	}
-	refRows.Close()
 	return dstRepo, nil
 }
 
@@ -647,11 +343,9 @@ func (r *Repo) WriteObject(o *object.Object) error {
 	if err != nil {
 		return err
 	}
-	_, err = r.cs.d.exec(
-		"INSERT INTO objects(sha, kind, content) VALUES(?,?,?) ON CONFLICT(sha) DO NOTHING",
-		id.String(), int(o.Kind), payload,
-	)
-	return err
+	row := &objectRow{ID: id.String(), Kind: int(o.Kind), Content: payload}
+	// ON CONFLICT DO NOTHING
+	return r.cs.d.gdb.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error
 }
 
 // WriteObjectsBatch stores many objects in a single transaction, reducing
@@ -661,45 +355,33 @@ func (r *Repo) WriteObjectsBatch(objs []*object.Object) error {
 	if len(objs) == 0 {
 		return nil
 	}
-	tx, err := r.cs.d.db.Begin()
-	if err != nil {
-		return err
-	}
-	stmt, err := tx.Prepare(
-		"INSERT INTO objects(sha, kind, content) VALUES(?,?,?) ON CONFLICT(sha) DO NOTHING",
-	)
-	if err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	defer stmt.Close()
-	for _, o := range objs {
-		id := o.ID()
-		payload, err := object.EncodeObject(o)
-		if err != nil {
-			_ = tx.Rollback()
-			return err
+	return r.cs.d.gdb.Transaction(func(tx *gorm.DB) error {
+		for _, o := range objs {
+			id := o.ID()
+			payload, err := object.EncodeObject(o)
+			if err != nil {
+				return err
+			}
+			row := &objectRow{ID: id.String(), Kind: int(o.Kind), Content: payload}
+			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error; err != nil {
+				return err
+			}
 		}
-		if _, err := stmt.Exec(id.String(), int(o.Kind), payload); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-	}
-	return tx.Commit()
+		return nil
+	})
 }
 
 // ReadObject reads a global content-addressed object.
 func (r *Repo) ReadObject(id object.ID) (*object.Object, error) {
-	var kind int
-	var content []byte
-	err := r.cs.d.queryRow("SELECT kind, content FROM objects WHERE sha=?", id.String()).Scan(&kind, &content)
-	if err == sql.ErrNoRows {
+	var row objectRow
+	err := r.cs.d.gdb.Where("sha=?", id.String()).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	return object.DecodeObject(id, content)
+	return object.DecodeObject(id, row.Content)
 }
 
 // ObjectIDs returns all content-addressed object ids held anywhere in the
@@ -707,34 +389,26 @@ func (r *Repo) ReadObject(id object.ID) (*object.Object, error) {
 // is used by clients to advertise "have" objects during fetch/push so a peer
 // only sends objects the destination lacks.
 func (r *Repo) ObjectIDs() ([]object.ID, error) {
-	rows, err := r.cs.d.query("SELECT sha FROM objects")
-	if err != nil {
+	var rows []string
+	if err := r.cs.d.gdb.Model(&objectRow{}).Pluck("sha", &rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []object.ID
-	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			return nil, err
+	out := make([]object.ID, 0, len(rows))
+	for _, s := range rows {
+		if id, err := object.HexToID(s); err == nil {
+			out = append(out, id)
 		}
-		id, err := object.HexToID(s)
-		if err != nil {
-			continue
-		}
-		out = append(out, id)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // ObjectExists reports whether an object is present.
 func (r *Repo) ObjectExists(id object.ID) (bool, error) {
-	var one int
-	err := r.cs.d.queryRow("SELECT 1 FROM objects WHERE sha=?", id.String()).Scan(&one)
-	if err == sql.ErrNoRows {
-		return false, nil
+	var count int64
+	if err := r.cs.d.gdb.Model(&objectRow{}).Where("sha=?", id.String()).Count(&count).Error; err != nil {
+		return false, err
 	}
-	return err == nil, err
+	return count > 0, nil
 }
 
 // PutSnapshot stores a snapshot scoped to this repository. Parents, author, and
@@ -745,14 +419,14 @@ func (r *Repo) PutSnapshot(snap *Snapshot) error {
 		Author:      encoding.Author{Name: snap.Author.Name, Email: snap.Author.Email},
 		Description: snap.Description,
 	})
-	_, err := r.cs.d.exec(
-		`INSERT INTO snapshots(repo_id, sha, revision_id, tree_id, commit_time, meta)
-		 VALUES(?,?,?,?,?,?)
-		 ON CONFLICT(repo_id, sha) DO UPDATE SET revision_id=excluded.revision_id, tree_id=excluded.tree_id, commit_time=excluded.commit_time, meta=excluded.meta`,
-		r.repoID, snap.RevisionHash.String(), snap.RevisionID, snap.TreeID.String(),
-		snap.CommitTime.UnixMilli(), meta,
-	)
-	return err
+	row := &snapshotRow{
+		ID: snap.RevisionHash.String(), RepoID: r.repoID, RevisionID: snap.RevisionID,
+		TreeID: snap.TreeID.String(), CommitTime: snap.CommitTime.UnixMilli(), Meta: meta,
+	}
+	return r.cs.d.gdb.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "repo_id"}, {Name: "sha"}},
+		UpdateAll: true,
+	}).Create(row).Error
 }
 
 // GetSnapshot reads a snapshot scoped to this repository.
@@ -761,127 +435,116 @@ func (r *Repo) GetSnapshot(id object.ID) (*Snapshot, error) {
 }
 
 func (r *Repo) getSnapshot(id object.ID) (*Snapshot, error) {
-	var sha, revisionID, treeID string
-	var commitTime int64
-	var meta []byte
-	err := r.cs.d.queryRow(
-		"SELECT sha, revision_id, tree_id, commit_time, meta FROM snapshots WHERE repo_id=? AND sha=?",
-		r.repoID, id.String(),
-	).Scan(&sha, &revisionID, &treeID, &commitTime, &meta)
-	if err == sql.ErrNoRows {
+	var row snapshotRow
+	err := r.cs.d.gdb.Where("repo_id=? AND sha=?", r.repoID, id.String()).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	oid, err := object.HexToID(sha)
+	oid, err := object.HexToID(row.ID)
 	if err != nil {
 		return nil, err
 	}
-	tid, err := object.HexToID(treeID)
+	tid, err := object.HexToID(row.TreeID)
 	if err != nil {
 		return nil, err
 	}
-	decoded, err := encoding.DecodeSnapshotMeta(meta)
+	decoded, err := encoding.DecodeSnapshotMeta(row.Meta)
 	if err != nil {
 		return nil, err
 	}
 	return &Snapshot{
-		RevisionHash: oid, RevisionID: revisionID, Parents: decoded.Parents, TreeID: tid,
+		RevisionHash: oid, RevisionID: row.RevisionID, Parents: decoded.Parents, TreeID: tid,
 		Description: decoded.Description,
 		Author:      Author{Name: decoded.Author.Name, Email: decoded.Author.Email},
-		CommitTime:  time.UnixMilli(commitTime),
+		CommitTime:  time.UnixMilli(row.CommitTime),
 	}, nil
 }
 
 // PutRevision stores a revision scoped to this repository.
 func (r *Repo) PutRevision(rev *Revision) error {
-	changed, err := json.Marshal(rev.ChangedPaths)
-	if err != nil {
-		return err
-	}
-	_, err = r.cs.d.exec(
-		`INSERT INTO revisions(repo_id, id, hash, created, fork_from, changed_paths) VALUES(?,?,?,?,?,?)
-		 ON CONFLICT(repo_id, id) DO UPDATE SET hash=excluded.hash, fork_from=excluded.fork_from, changed_paths=excluded.changed_paths`,
-		r.repoID, rev.ID, rev.Hash.String(), rev.Created.UnixMilli(), nullable(rev.ForkFrom), changed,
-	)
-	return err
+	row := r.toRevisionRow(rev)
+	return r.cs.d.gdb.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "repo_id"}, {Name: "id"}},
+		UpdateAll: true,
+	}).Create(row).Error
 }
 
 // PutRevisionTx inserts a revision within an open transaction.
-func (r *Repo) PutRevisionTx(tx *sql.Tx, rev *Revision) error {
-	changed, err := json.Marshal(rev.ChangedPaths)
-	if err != nil {
-		return err
-	}
-	_, err = r.cs.d.execTx(tx,
-		`INSERT INTO revisions(repo_id, id, hash, created, fork_from, changed_paths) VALUES(?,?,?,?,?,?)
-		 ON CONFLICT(repo_id, id) DO UPDATE SET hash=excluded.hash, fork_from=excluded.fork_from, changed_paths=excluded.changed_paths`,
-		r.repoID, rev.ID, rev.Hash.String(), rev.Created.UnixMilli(), nullable(rev.ForkFrom), changed,
-	)
-	return err
+func (r *Repo) PutRevisionTx(tx *gorm.DB, rev *Revision) error {
+	row := r.toRevisionRow(rev)
+	return tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "repo_id"}, {Name: "id"}},
+		UpdateAll: true,
+	}).Create(row).Error
 }
 
 // PutSnapshotTx inserts a snapshot within an open transaction.
-func (r *Repo) PutSnapshotTx(tx *sql.Tx, snap *Snapshot) error {
+func (r *Repo) PutSnapshotTx(tx *gorm.DB, snap *Snapshot) error {
 	meta := encoding.EncodeSnapshotMeta(encoding.BaseSnapshot{
 		Parents:     snap.Parents,
 		Author:      encoding.Author{Name: snap.Author.Name, Email: snap.Author.Email},
 		Description: snap.Description,
 	})
-	_, err := r.cs.d.execTx(tx,
-		`INSERT INTO snapshots(repo_id, sha, revision_id, tree_id, commit_time, meta)
-		 VALUES(?,?,?,?,?,?)
-		 ON CONFLICT(repo_id, sha) DO UPDATE SET revision_id=excluded.revision_id, tree_id=excluded.tree_id, commit_time=excluded.commit_time, meta=excluded.meta`,
-		r.repoID, snap.RevisionHash.String(), snap.RevisionID, snap.TreeID.String(),
-		snap.CommitTime.UnixMilli(), meta,
-	)
-	return err
+	row := &snapshotRow{
+		ID: snap.RevisionHash.String(), RepoID: r.repoID, RevisionID: snap.RevisionID,
+		TreeID: snap.TreeID.String(), CommitTime: snap.CommitTime.UnixMilli(), Meta: meta,
+	}
+	return tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "repo_id"}, {Name: "sha"}},
+		UpdateAll: true,
+	}).Create(row).Error
 }
 
 // WriteObjectsBatchTx stores objects in the given transaction.
-func (r *Repo) WriteObjectsBatchTx(tx *sql.Tx, objs []*object.Object) error {
+func (r *Repo) WriteObjectsBatchTx(tx *gorm.DB, objs []*object.Object) error {
 	for _, o := range objs {
 		id := o.ID()
 		payload, err := object.EncodeObject(o)
 		if err != nil {
 			return err
 		}
-		if _, err := r.cs.d.execTx(tx,
-			"INSERT INTO objects(sha, kind, content) VALUES(?,?,?) ON CONFLICT(sha) DO NOTHING",
-			id.String(), int(o.Kind), payload,
-		); err != nil {
+		row := &objectRow{ID: id.String(), Kind: int(o.Kind), Content: payload}
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error; err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// BeginTx starts a transaction on the central store.
-func (r *Repo) BeginTx() (*sql.Tx, error) { return r.cs.d.db.Begin() }
+// BeginTx starts a GORM transaction on the central store.
+func (r *Repo) BeginTx() *gorm.DB { return r.cs.d.gdb.Begin() }
+
+// toRevisionRow maps a Revision to its persistent row.
+func (r *Repo) toRevisionRow(rev *Revision) *revisionRow {
+	changed, _ := json.Marshal(rev.ChangedPaths)
+	return &revisionRow{
+		RepoID: r.repoID, ID: rev.ID, Hash: rev.Hash.String(),
+		Created: rev.Created.UnixMilli(), ForkFrom: rev.ForkFrom, ChangedPath: changed,
+	}
+}
 
 // GetRevision reads a revision scoped to this repository.
 func (r *Repo) GetRevision(id string) (*Revision, error) {
-	var hash string
-	var created int64
-	var forkFrom sql.NullString
-	var changed []byte
-	err := r.cs.d.queryRow(
-		"SELECT hash, created, fork_from, changed_paths FROM revisions WHERE repo_id=? AND id=?",
-		r.repoID, id,
-	).Scan(&hash, &created, &forkFrom, &changed)
-	if err == sql.ErrNoRows {
+	var row revisionRow
+	err := r.cs.d.gdb.Where("repo_id=? AND id=?", r.repoID, id).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	cur, _ := idFromStr(hash)
-	var paths []string
-	if err := json.Unmarshal(changed, &paths); err != nil {
-		paths = nil
+	return r.fromRevisionRow(&row), nil
+}
+
+func (r *Repo) fromRevisionRow(row *revisionRow) *Revision {
+	cur, _ := object.HexToID(row.Hash)
+	return &Revision{
+		ID: row.ID, Hash: cur, Created: time.UnixMilli(row.Created),
+		ForkFrom: row.ForkFrom, ChangedPaths: decodeChangedPathsJSON(row.ChangedPath),
 	}
-	return &Revision{ID: id, Hash: cur, Created: time.UnixMilli(created), ForkFrom: forkFrom.String, ChangedPaths: paths}, nil
 }
 
 // UpdateRevisionHash atomically repoints a revision's Hash field. It preserves
@@ -897,50 +560,33 @@ func (r *Repo) UpdateRevisionHash(revisionID string, hash object.ID) error {
 
 // ListRevisions lists revisions scoped to this repository.
 func (r *Repo) ListRevisions() ([]*Revision, error) {
-	rows, err := r.cs.d.query(
-		"SELECT id, hash, created, fork_from, changed_paths FROM revisions WHERE repo_id=?",
-		r.repoID,
-	)
-	if err != nil {
+	var rows []revisionRow
+	if err := r.cs.d.gdb.Where("repo_id=?", r.repoID).Order("id").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*Revision
-	for rows.Next() {
-		var id, hash string
-		var created int64
-		var forkFrom sql.NullString
-		var changed []byte
-		if err := rows.Scan(&id, &hash, &created, &forkFrom, &changed); err != nil {
-			return nil, err
-		}
-		cur, _ := idFromStr(hash)
-		var paths []string
-		if err := json.Unmarshal(changed, &paths); err != nil {
-			paths = nil
-		}
-		out = append(out, &Revision{ID: id, Hash: cur, Created: time.UnixMilli(created), ForkFrom: forkFrom.String, ChangedPaths: paths})
+	out := make([]*Revision, 0, len(rows))
+	for i := range rows {
+		out = append(out, r.fromRevisionRow(&rows[i]))
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // PutRef stores a ref scoped to this repository.
 func (r *Repo) PutRef(ref *Ref) error {
-	_, err := r.cs.d.exec(
-		`INSERT INTO refs(repo_id, name, kind, target) VALUES(?,?,?,?)
-		 ON CONFLICT(repo_id, name) DO UPDATE SET kind=excluded.kind, target=excluded.target`,
-		r.repoID, ref.Name, string(ref.Kind), ref.Target,
-	)
-	return err
+	row := &refRow{RepoID: r.repoID, Name: ref.Name, Kind: string(ref.Kind), Target: ref.Target}
+	return r.cs.d.gdb.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "repo_id"}, {Name: "name"}},
+		UpdateAll: true,
+	}).Create(row).Error
 }
 
 // DeleteRef removes a ref scoped to this repository.
 func (r *Repo) DeleteRef(name string) error {
-	res, err := r.cs.d.exec("DELETE FROM refs WHERE repo_id=? AND name=?", r.repoID, name)
-	if err != nil {
-		return err
+	res := r.cs.d.gdb.Where("repo_id=? AND name=?", r.repoID, name).Delete(&refRow{})
+	if res.Error != nil {
+		return res.Error
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if res.RowsAffected == 0 {
 		return ErrNotFound
 	}
 	return nil
@@ -948,33 +594,28 @@ func (r *Repo) DeleteRef(name string) error {
 
 // GetRef reads a ref scoped to this repository.
 func (r *Repo) GetRef(name string) (*Ref, error) {
-	var kind, target string
-	err := r.cs.d.queryRow("SELECT kind, target FROM refs WHERE repo_id=? AND name=?", r.repoID, name).Scan(&kind, &target)
-	if err == sql.ErrNoRows {
+	var row refRow
+	err := r.cs.d.gdb.Where("repo_id=? AND name=?", r.repoID, name).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &Ref{Name: name, Kind: RefKind(kind), Target: target}, nil
+	return &Ref{Name: row.Name, Kind: RefKind(row.Kind), Target: row.Target}, nil
 }
 
 // ListRefs lists refs scoped to this repository.
 func (r *Repo) ListRefs() ([]*Ref, error) {
-	rows, err := r.cs.d.query("SELECT name, kind, target FROM refs WHERE repo_id=?", r.repoID)
-	if err != nil {
+	var rows []refRow
+	if err := r.cs.d.gdb.Where("repo_id=?", r.repoID).Order("name").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*Ref
-	for rows.Next() {
-		var rf Ref
-		if err := rows.Scan(&rf.Name, &rf.Kind, &rf.Target); err != nil {
-			return nil, err
-		}
-		out = append(out, &rf)
+	out := make([]*Ref, 0, len(rows))
+	for i := range rows {
+		out = append(out, &Ref{Name: rows[i].Name, Kind: RefKind(rows[i].Kind), Target: rows[i].Target})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // Close is a no-op for the repo handle (the CentralStore is shared).
@@ -994,39 +635,31 @@ type Remote struct {
 // PutRemote registers or updates a remote for this repository. An empty token
 // clears the stored token.
 func (r *Repo) PutRemote(name, url, token string) error {
-	_, err := r.cs.d.exec(
-		`INSERT INTO remotes(repo_id, name, url, token) VALUES(?,?,?,?)
-		 ON CONFLICT(repo_id, name) DO UPDATE SET url=excluded.url, token=excluded.token`,
-		r.repoID, name, url, nullable(token),
-	)
-	return err
+	row := &remoteRow{RepoID: r.repoID, Name: name, URL: url, Token: nullable(token)}
+	return r.cs.d.gdb.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "repo_id"}, {Name: "name"}},
+		UpdateAll: true,
+	}).Create(row).Error
 }
 
 // UpdateRemoteSyncTip records the last successfully synced tip for a remote
 // branch (the local revision id that mirrors the remote's tip after a pull).
 // Empty clears it. This enables incremental/conflict-aware pulls.
 func (r *Repo) UpdateRemoteSyncTip(name, lastSyncTip string) error {
-	_, err := r.cs.d.exec(
-		"UPDATE remotes SET last_sync_tip=? WHERE repo_id=? AND name=?",
-		lastSyncTip, r.repoID, name,
-	)
-	return err
+	return r.cs.d.gdb.Model(&remoteRow{}).Where("repo_id=? AND name=?", r.repoID, name).Update("last_sync_tip", lastSyncTip).Error
 }
 
 // GetLastSyncTip returns the last synced tip for a remote ("" if none).
 func (r *Repo) GetLastSyncTip(name string) (string, error) {
-	var t sql.NullString
-	err := r.cs.d.queryRow(
-		"SELECT last_sync_tip FROM remotes WHERE repo_id=? AND name=?",
-		r.repoID, name,
-	).Scan(&t)
-	if err == sql.ErrNoRows {
+	var row remoteRow
+	err := r.cs.d.gdb.Where("repo_id=? AND name=?", r.repoID, name).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return "", nil
 	}
 	if err != nil {
 		return "", err
 	}
-	return t.String, nil
+	return row.LastSyncTip, nil
 }
 
 // RemoteRef is a snapshot of a remote's ref as last fetched, scoped to a remote
@@ -1040,116 +673,89 @@ type RemoteRef struct {
 
 // SetRemoteRef upserts a remote ref. Primary key is remote+kind+name.
 func (r *Repo) SetRemoteRef(remoteName string, ref *RemoteRef) error {
-	_, err := r.cs.d.exec(
-		`INSERT INTO remote_refs(repo_id, remote_name, kind, name, target)
-		 VALUES(?,?,?,?,?)
-		 ON CONFLICT(repo_id, remote_name, kind, name) DO UPDATE SET target=excluded.target`,
-		r.repoID, remoteName, string(ref.Kind), ref.Name, ref.Target,
-	)
-	return err
+	row := &remoteRefRow{RepoID: r.repoID, RemoteName: remoteName, Kind: string(ref.Kind), Name: ref.Name, Target: ref.Target}
+	return r.cs.d.gdb.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "repo_id"}, {Name: "remote_name"}, {Name: "kind"}, {Name: "name"}},
+		UpdateAll: true,
+	}).Create(row).Error
 }
 
 // ListRemoteRefs lists all remote refs for this repo (optionally filtered by
 // remote name). Returns refs keyed under the remote (name is bare, e.g. "main").
 func (r *Repo) ListRemoteRefs(remoteName string) ([]*RemoteRef, error) {
-	q := "SELECT remote_name, kind, name, target FROM remote_refs WHERE repo_id=?"
-	var args []any
-	args = append(args, r.repoID)
+	q := r.cs.d.gdb.Where("repo_id=?", r.repoID)
 	if remoteName != "" {
-		q += " AND remote_name=?"
-		args = append(args, remoteName)
+		q = q.Where("remote_name=?", remoteName)
 	}
-	q += " ORDER BY remote_name, name"
-	rows, err := r.cs.d.query(q, args...)
-	if err != nil {
+	var rows []remoteRefRow
+	if err := q.Order("remote_name, name").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*RemoteRef
-	for rows.Next() {
-		var rr RemoteRef
-		var kind string
-		if err := rows.Scan(&rr.RemoteName, &kind, &rr.Name, &rr.Target); err != nil {
-			return nil, err
-		}
-		rr.Kind = RefKind(kind)
-		out = append(out, &rr)
+	out := make([]*RemoteRef, 0, len(rows))
+	for i := range rows {
+		out = append(out, &RemoteRef{RemoteName: rows[i].RemoteName, Kind: RefKind(rows[i].Kind), Name: rows[i].Name, Target: rows[i].Target})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // DeleteRemoteRefsForRemote clears all recorded refs for a remote (used when a
 // remote is deleted or force-refreshed).
 func (r *Repo) DeleteRemoteRefsForRemote(remoteName string) error {
-	_, err := r.cs.d.exec("DELETE FROM remote_refs WHERE repo_id=? AND remote_name=?", r.repoID, remoteName)
-	return err
+	return r.cs.d.gdb.Where("repo_id=? AND remote_name=?", r.repoID, remoteName).Delete(&remoteRefRow{}).Error
 }
 
 // SetRemoteDefaultBranch records which branch on a remote is its default.
 func (r *Repo) SetRemoteDefaultBranch(name, def string) error {
-	_, err := r.cs.d.exec(
-		"UPDATE remotes SET default_branch=? WHERE repo_id=? AND name=?",
-		def, r.repoID, name,
-	)
-	return err
+	return r.cs.d.gdb.Model(&remoteRow{}).Where("repo_id=? AND name=?", r.repoID, name).Update("default_branch", def).Error
 }
 
 // GetRemoteDefaultBranch returns the remote's default branch ("" if none).
 func (r *Repo) GetRemoteDefaultBranch(name string) (string, error) {
-	var d sql.NullString
-	err := r.cs.d.queryRow(
-		"SELECT default_branch FROM remotes WHERE repo_id=? AND name=?",
-		r.repoID, name,
-	).Scan(&d)
-	if err == sql.ErrNoRows {
+	var row remoteRow
+	err := r.cs.d.gdb.Where("repo_id=? AND name=?", r.repoID, name).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return "", nil
 	}
 	if err != nil {
 		return "", err
 	}
-	return d.String, nil
+	return row.DefaultBranch, nil
 }
 
 // GetRemote returns a remote by name.
 func (r *Repo) GetRemote(name string) (*Remote, error) {
-	var url string
-	var token sql.NullString
-	err := r.cs.d.queryRow(
-		"SELECT url, token FROM remotes WHERE repo_id=? AND name=?",
-		r.repoID, name,
-	).Scan(&url, &token)
-	if err == sql.ErrNoRows {
+	var row remoteRow
+	err := r.cs.d.gdb.Where("repo_id=? AND name=?", r.repoID, name).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &Remote{Name: name, URL: url, Token: token.String}, nil
+	token := ""
+	if row.Token != nil {
+		token = *row.Token
+	}
+	return &Remote{Name: name, URL: row.URL, Token: token}, nil
 }
 
 // DeleteRemote removes a remote by name.
 func (r *Repo) DeleteRemote(name string) error {
-	_, err := r.cs.d.exec("DELETE FROM remotes WHERE repo_id=? AND name=?", r.repoID, name)
-	return err
+	return r.cs.d.gdb.Where("repo_id=? AND name=?", r.repoID, name).Delete(&remoteRow{}).Error
 }
 
 // ListRemotes lists all remotes for this repository. Tokens are omitted from
 // the returned list to avoid leaking secrets.
 func (r *Repo) ListRemotes() ([]*Remote, error) {
-	rows, err := r.cs.d.query("SELECT name, url FROM remotes WHERE repo_id=?", r.repoID)
-	if err != nil {
+	var rows []remoteRow
+	if err := r.cs.d.gdb.Where("repo_id=?", r.repoID).Order("name").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*Remote
-	for rows.Next() {
-		var rem Remote
-		if err := rows.Scan(&rem.Name, &rem.URL); err != nil {
-			return nil, err
-		}
-		out = append(out, &rem)
+	out := make([]*Remote, 0, len(rows))
+	for i := range rows {
+		out = append(out, &Remote{Name: rows[i].Name, URL: rows[i].URL})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func nullable(s string) *string {
@@ -1162,19 +768,11 @@ func nullable(s string) *string {
 // QueryCount returns the total number of content-addressed objects. It is a
 // convenience for tests to verify global deduplication.
 func (s *CentralStore) QueryCount(count *int) error {
-	return s.d.queryRow("SELECT COUNT(*) FROM objects").Scan(count)
-}
-
-func idsToStrs(ids []object.ID) []string {
-	out := make([]string, len(ids))
-	for i, id := range ids {
-		out[i] = id.String()
+	var c int64
+	if err := s.d.gdb.Model(&objectRow{}).Count(&c).Error; err != nil {
+		return err
 	}
-	return out
+	*count = int(c)
+	return nil
 }
 
-func idFromStr(s string) (object.ID, error) {
-	return object.HexToID(s)
-}
-
-func privatePlaceholder() string { return strings.TrimSpace(" ") }

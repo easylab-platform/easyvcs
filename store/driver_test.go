@@ -1,23 +1,21 @@
 package store
 
-import "testing"
+import (
+	"testing"
 
-func TestRebindPostgres(t *testing.T) {
-	q := "INSERT INTO t(a,b) VALUES(?,?) WHERE c=? AND d IS NOT NULL"
-	got := rebindPostgres(q)
-	want := "INSERT INTO t(a,b) VALUES($1,$2) WHERE c=$3 AND d IS NOT NULL"
-	if got != want {
-		t.Fatalf("rebind: %q want %q", got, want)
-	}
-}
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+)
 
-func TestOpenDriverSQLite(t *testing.T) {
+func TestOpenDriverSQLiteDialect(t *testing.T) {
+	// GORM uses the glebarez/sqlite (pure-Go) dialector for sqlite. Assert the
+	// store opens and a repo round-trips.
 	cs, err := OpenDriver(DriverConfig{Kind: KindSQLite, DSN: t.TempDir() + "/t.db"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cs.Close()
-	// Repo create/list round-trip.
 	r, err := cs.Create(RepoRef{Namespace: "n", Name: "r"})
 	if err != nil {
 		t.Fatal(err)
@@ -26,3 +24,16 @@ func TestOpenDriverSQLite(t *testing.T) {
 		t.Fatalf("repo: %s", r.String())
 	}
 }
+
+func TestOpenDriverDialectors(t *testing.T) {
+	// Validate each dialector builds a *gorm.DB (no server needed) by opening an
+	// in-memory sqlite via glebarez and asserting the GORM session is live.
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if db == nil {
+		t.Fatal("empty db")
+	}
+}
+

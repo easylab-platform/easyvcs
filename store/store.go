@@ -12,13 +12,13 @@
 package store
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/easylab-platform/easyvcs/object"
+	"gorm.io/gorm"
 )
 
 // ErrNotFound is returned when a keyed entity is absent.
@@ -161,10 +161,10 @@ type RepoStore interface {
 	ListRefs() ([]*Ref, error)
 
 	// Transactional writes (for atomic commit from changes).
-	BeginTx() (*sql.Tx, error)
-	WriteObjectsBatchTx(tx *sql.Tx, objs []*object.Object) error
-	PutSnapshotTx(tx *sql.Tx, s *Snapshot) error
-	PutRevisionTx(tx *sql.Tx, r *Revision) error
+	BeginTx() *gorm.DB
+	WriteObjectsBatchTx(tx *gorm.DB, objs []*object.Object) error
+	PutSnapshotTx(tx *gorm.DB, s *Snapshot) error
+	PutRevisionTx(tx *gorm.DB, r *Revision) error
 
 	// Close flushes and closes the backend.
 	Close() error

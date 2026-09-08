@@ -281,10 +281,7 @@ func TestWorkspacesCRUD(t *testing.T) {
 func TestTxWrites(t *testing.T) {
 	cs := newTestCentral(t)
 	repo, _ := cs.Create(RepoRef{Namespace: "n", Name: "r"})
-	tx, err := repo.BeginTx()
-	if err != nil {
-		t.Fatal(err)
-	}
+	tx := repo.BeginTx()
 	if err := repo.WriteObjectsBatchTx(tx, []*object.Object{{Kind: object.KindBlob, Blob: []byte("tx")}}); err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +297,7 @@ func TestTxWrites(t *testing.T) {
 	if err := repo.PutRevisionTx(tx, rev); err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit().Error; err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := repo.GetSnapshot(snap.RevisionHash); got == nil {
@@ -344,14 +341,3 @@ func TestAuthorString(t *testing.T) {
 	}
 }
 
-func TestHelperFuncs(t *testing.T) {
-	if got := idsToStrs([]object.ID{object.BlobID([]byte("x"))}); len(got) != 1 || got[0] != object.BlobID([]byte("x")).String() {
-		t.Fatalf("idsToStrs: %v", got)
-	}
-	if _, err := idFromStr(object.BlobID([]byte("x")).String()); err != nil {
-		t.Fatal(err)
-	}
-	if privatePlaceholder() != "" {
-		t.Fatalf("privatePlaceholder returned %q", privatePlaceholder())
-	}
-}

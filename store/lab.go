@@ -1,10 +1,12 @@
 package store
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // User is a Lab account. A user owns namespaces (orgs) and repositories.
@@ -102,138 +104,97 @@ var ErrUnchangedPassword = errors.New("store: password unchanged")
 // CreateUser inserts a new user.
 func (s *CentralStore) CreateUser(username, displayName string) (*User, error) {
 	now := time.Now().UTC().UnixMilli()
-	res, err := s.d.exec(
-		"INSERT INTO users(username, display_name, created) VALUES(?,?,?)",
-		username, displayName, now,
-	)
-	if err != nil {
+	row := &userRow{Username: username, DisplayName: displayName, Created: now}
+	if err := s.d.gdb.Create(row).Error; err != nil {
 		return nil, err
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, err
-	}
-	return &User{ID: id, Username: username, DisplayName: displayName, Created: time.UnixMilli(now)}, nil
+	return &User{ID: row.ID, Username: username, DisplayName: displayName, Created: time.UnixMilli(now)}, nil
 }
 
 // GetUser returns a user by id.
 func (s *CentralStore) GetUser(id int64) (*User, error) {
-	var name, disp string
-	var created int64
-	err := s.d.queryRow(
-		"SELECT username, display_name, created FROM users WHERE id=?", id,
-	).Scan(&name, &disp, &created)
-	if err == sql.ErrNoRows {
+	var row userRow
+	err := s.d.gdb.Where("id=?", id).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &User{ID: id, Username: name, DisplayName: disp, Created: time.UnixMilli(created)}, nil
+	return &User{ID: row.ID, Username: row.Username, DisplayName: row.DisplayName, Created: time.UnixMilli(row.Created)}, nil
 }
 
 // GetUserByUsername returns a user by username.
 func (s *CentralStore) GetUserByUsername(username string) (*User, error) {
-	var id int64
-	var disp string
-	var created int64
-	err := s.d.queryRow(
-		"SELECT id, display_name, created FROM users WHERE username=?", username,
-	).Scan(&id, &disp, &created)
-	if err == sql.ErrNoRows {
+	var row userRow
+	err := s.d.gdb.Where("username=?", username).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &User{ID: id, Username: username, DisplayName: disp, Created: time.UnixMilli(created)}, nil
+	return &User{ID: row.ID, Username: row.Username, DisplayName: row.DisplayName, Created: time.UnixMilli(row.Created)}, nil
 }
 
 // ListUsers returns all users ordered by username.
 func (s *CentralStore) ListUsers() ([]*User, error) {
-	rows, err := s.d.query(
-		"SELECT id, username, display_name, created FROM users ORDER BY username",
-	)
-	if err != nil {
+	var rows []userRow
+	if err := s.d.gdb.Order("username").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*User
-	for rows.Next() {
-		var id, created int64
-		var name, disp string
-		if err := rows.Scan(&id, &name, &disp, &created); err != nil {
-			return nil, err
-		}
-		out = append(out, &User{ID: id, Username: name, DisplayName: disp, Created: time.UnixMilli(created)})
+	out := make([]*User, 0, len(rows))
+	for i := range rows {
+		out = append(out, &User{ID: rows[i].ID, Username: rows[i].Username, DisplayName: rows[i].DisplayName, Created: time.UnixMilli(rows[i].Created)})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // CreateToken inserts a bearer token for a user.
 func (s *CentralStore) CreateToken(token string, userID int64, level string) (*Token, error) {
 	now := time.Now().UTC().UnixMilli()
-	res, err := s.d.exec(
-		"INSERT INTO tokens(token, user_id, level, created) VALUES(?,?,?,?)",
-		token, userID, level, now,
-	)
-	if err != nil {
+	row := &tokenRow{Token: token, UserID: userID, Level: level, Created: now}
+	if err := s.d.gdb.Create(row).Error; err != nil {
 		return nil, err
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, err
-	}
-	return &Token{ID: id, Token: token, UserID: userID, Level: level, Created: time.UnixMilli(now)}, nil
+	return &Token{ID: row.ID, Token: token, UserID: userID, Level: level, Created: time.UnixMilli(now)}, nil
 }
 
 // LookupToken resolves a token string to its user and level. It returns
 // ErrTokenNotFound when the token is unknown.
 func (s *CentralStore) LookupToken(token string) (*Token, error) {
-	var id, userID, created int64
-	var level string
-	err := s.d.queryRow(
-		"SELECT id, user_id, level, created FROM tokens WHERE token=?", token,
-	).Scan(&id, &userID, &level, &created)
-	if err == sql.ErrNoRows {
+	var row tokenRow
+	err := s.d.gdb.Where("token=?", token).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrTokenNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &Token{ID: id, Token: token, UserID: userID, Level: level, Created: time.UnixMilli(created)}, nil
+	return &Token{ID: row.ID, Token: row.Token, UserID: row.UserID, Level: row.Level, Created: time.UnixMilli(row.Created)}, nil
 }
 
 // ListTokens returns all tokens for a user (omitting the secret for brevity is
 // not possible here since the token is the primary text; callers may skip it).
 func (s *CentralStore) ListTokens(userID int64) ([]*Token, error) {
-	rows, err := s.d.query(
-		"SELECT id, token, user_id, level, created FROM tokens WHERE user_id=?", userID,
-	)
-	if err != nil {
+	var rows []tokenRow
+	if err := s.d.gdb.Where("user_id=?", userID).Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*Token
-	for rows.Next() {
-		var t Token
-		var created int64
-		if err := rows.Scan(&t.ID, &t.Token, &t.UserID, &t.Level, &created); err != nil {
-			return nil, err
-		}
-		t.Created = time.UnixMilli(created)
-		out = append(out, &t)
+	out := make([]*Token, 0, len(rows))
+	for i := range rows {
+		out = append(out, &Token{ID: rows[i].ID, Token: rows[i].Token, UserID: rows[i].UserID, Level: rows[i].Level, Created: time.UnixMilli(rows[i].Created)})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // DeleteToken removes a token by its secret value.
 func (s *CentralStore) DeleteToken(token string) error {
-	res, err := s.d.exec("DELETE FROM tokens WHERE token=?", token)
-	if err != nil {
-		return err
+	res := s.d.gdb.Where("token=?", token).Delete(&tokenRow{})
+	if res.Error != nil {
+		return res.Error
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if res.RowsAffected == 0 {
 		return ErrTokenNotFound
 	}
 	return nil
@@ -241,92 +202,60 @@ func (s *CentralStore) DeleteToken(token string) error {
 
 // AddNamespaceMember grants a user membership in a namespace with a role.
 func (s *CentralStore) AddNamespaceMember(namespace string, userID int64, role string) error {
-	_, err := s.d.exec(
-		`INSERT INTO namespace_members(namespace, user_id, role) VALUES(?,?,?)
-		 ON CONFLICT(namespace, user_id) DO UPDATE SET role=excluded.role`,
-		namespace, userID, role,
-	)
-	return err
+	row := &namespaceMemberRow{Namespace: namespace, UserID: userID, Role: role}
+	return s.d.gdb.Clauses(clause.OnConflict{UpdateAll: true}).Create(row).Error
 }
 
 // RemoveNamespaceMember revokes a user's membership in a namespace.
 func (s *CentralStore) RemoveNamespaceMember(namespace string, userID int64) error {
-	_, err := s.d.exec(
-		"DELETE FROM namespace_members WHERE namespace=? AND user_id=?",
-		namespace, userID,
-	)
-	return err
+	return s.d.gdb.Where("namespace=? AND user_id=?", namespace, userID).Delete(&namespaceMemberRow{}).Error
 }
 
 // GetNamespaceMember returns a user's membership in a namespace.
 func (s *CentralStore) GetNamespaceMember(namespace string, userID int64) (*NamespaceMember, error) {
-	var role string
-	err := s.d.queryRow(
-		"SELECT role FROM namespace_members WHERE namespace=? AND user_id=?",
-		namespace, userID,
-	).Scan(&role)
-	if err == sql.ErrNoRows {
+	var row namespaceMemberRow
+	err := s.d.gdb.Where("namespace=? AND user_id=?", namespace, userID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &NamespaceMember{Namespace: namespace, UserID: userID, Role: role}, nil
+	return &NamespaceMember{Namespace: row.Namespace, UserID: row.UserID, Role: row.Role}, nil
 }
 
 // ListNamespaceMembers lists members of a namespace.
 func (s *CentralStore) ListNamespaceMembers(namespace string) ([]*NamespaceMember, error) {
-	rows, err := s.d.query(
-		"SELECT user_id, role FROM namespace_members WHERE namespace=? ORDER BY user_id",
-		namespace,
-	)
-	if err != nil {
+	var rows []namespaceMemberRow
+	if err := s.d.gdb.Where("namespace=?", namespace).Order("user_id").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*NamespaceMember
-	for rows.Next() {
-		var m NamespaceMember
-		if err := rows.Scan(&m.UserID, &m.Role); err != nil {
-			return nil, err
-		}
-		m.Namespace = namespace
-		out = append(out, &m)
+	out := make([]*NamespaceMember, 0, len(rows))
+	for i := range rows {
+		out = append(out, &NamespaceMember{Namespace: rows[i].Namespace, UserID: rows[i].UserID, Role: rows[i].Role})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // ListUserNamespaces returns the namespaces a user belongs to.
 func (s *CentralStore) ListUserNamespaces(userID int64) ([]*NamespaceMember, error) {
-	rows, err := s.d.query(
-		"SELECT namespace, role FROM namespace_members WHERE user_id=? ORDER BY namespace",
-		userID,
-	)
-	if err != nil {
+	var rows []namespaceMemberRow
+	if err := s.d.gdb.Where("user_id=?", userID).Order("namespace").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*NamespaceMember
-	for rows.Next() {
-		var m NamespaceMember
-		if err := rows.Scan(&m.Namespace, &m.Role); err != nil {
-			return nil, err
-		}
-		m.UserID = userID
-		out = append(out, &m)
+	out := make([]*NamespaceMember, 0, len(rows))
+	for i := range rows {
+		out = append(out, &NamespaceMember{Namespace: rows[i].Namespace, UserID: rows[i].UserID, Role: rows[i].Role})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // IsNamespaceMember reports whether a user belongs to a namespace, regardless of
 // role. The user has read access to that namespace's private repositories.
 func (s *CentralStore) IsNamespaceMember(namespace string, userID int64) bool {
-	var one int
-	err := s.d.queryRow(
-		"SELECT 1 FROM namespace_members WHERE namespace=? AND user_id=?",
-		namespace, userID,
-	).Scan(&one)
-	return err == nil
+	var count int64
+	s.d.gdb.Model(&namespaceMemberRow{}).Where("namespace=? AND user_id=?", namespace, userID).Count(&count)
+	return count > 0
 }
 
 // UserCanReadRepo reports whether a user may read a repository. Public
@@ -369,75 +298,60 @@ func (s *CentralStore) instanceIsOpen() bool {
 
 // RepoMeta returns the hosting metadata for a repository.
 func (r *Repo) RepoMeta() (RepoMeta, error) {
-	var desc, vis, def, kind, mirrorURL, mirrorBranch, mirrorLastRev, mirrorLastErr, mirrorToken string
-	var mirrorInterval int64
-	var mirrorLastSync int64
-	err := r.cs.d.queryRow(
-		`SELECT description, visibility, default_branch, kind,
-		        mirror_url, mirror_branch, mirror_interval,
-		        mirror_last_rev, mirror_last_sync, mirror_last_error, mirror_token
-		 FROM repositories WHERE id=?`,
-		r.repoID,
-	).Scan(&desc, &vis, &def, &kind, &mirrorURL, &mirrorBranch, &mirrorInterval,
-		&mirrorLastRev, &mirrorLastSync, &mirrorLastErr, &mirrorToken)
-	if err == sql.ErrNoRows {
-		return RepoMeta{}, ErrNotFound
-	}
-	if err != nil {
+	var row repoRow
+	if err := r.cs.d.gdb.Where("id=?", r.repoID).First(&row).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return RepoMeta{}, ErrNotFound
+		}
 		return RepoMeta{}, err
 	}
 	return RepoMeta{
-		Description: desc, Visibility: vis, DefaultBranch: def,
-		Kind: kind, MirrorURL: mirrorURL, MirrorBranch: mirrorBranch,
-		MirrorInterval: int(mirrorInterval), MirrorLastRev: mirrorLastRev,
-		MirrorLastSync: mirrorLastSync, MirrorLastErr: mirrorLastErr, MirrorToken: mirrorToken,
+		Description: row.Description, Visibility: row.Visibility, DefaultBranch: row.DefaultBranch,
+		Kind: row.Kind, MirrorURL: row.MirrorURL, MirrorBranch: row.MirrorBranch,
+		MirrorInterval: int(row.MirrorInterval), MirrorLastRev: row.MirrorLastRev,
+		MirrorLastSync: row.MirrorLastSync, MirrorLastErr: row.MirrorLastErr, MirrorToken: row.MirrorToken,
 	}, nil
 }
 
 // UpdateRepoMeta updates description/visibility/default branch.
 func (r *Repo) UpdateRepoMeta(m RepoMeta) error {
-	_, err := r.cs.d.exec(
-		"UPDATE repositories SET description=?, visibility=?, default_branch=? WHERE id=?",
-		m.Description, m.Visibility, m.DefaultBranch, r.repoID,
-	)
-	return err
+	return r.cs.d.gdb.Model(&repoRow{}).Where("id=?", r.repoID).Updates(map[string]any{
+		"description": m.Description, "visibility": m.Visibility, "default_branch": m.DefaultBranch,
+	}).Error
 }
 
 // UpdateMirrorMeta records mirror state (url, branch, interval, last result).
 func (r *Repo) UpdateMirrorMeta(m RepoMeta) error {
-	_, err := r.cs.d.exec(
-		`UPDATE repositories SET kind=?, mirror_url=?, mirror_branch=?,
-		        mirror_interval=?, mirror_last_rev=?, mirror_last_sync=?,
-		        mirror_last_error=?, mirror_token=?
-		 WHERE id=?`,
-		m.Kind, m.MirrorURL, m.MirrorBranch, m.MirrorInterval,
-		m.MirrorLastRev, m.MirrorLastSync, m.MirrorLastErr, m.MirrorToken, r.repoID,
-	)
-	return err
+	return r.cs.d.gdb.Model(&repoRow{}).Where("id=?", r.repoID).Updates(map[string]any{
+		"kind": m.Kind, "mirror_url": m.MirrorURL, "mirror_branch": m.MirrorBranch,
+		"mirror_interval": m.MirrorInterval, "mirror_last_rev": m.MirrorLastRev,
+		"mirror_last_sync": m.MirrorLastSync, "mirror_last_error": m.MirrorLastErr,
+		"mirror_token": m.MirrorToken,
+	}).Error
 }
 
 // CreateMergeRequest inserts a new MR and returns it. IID is assigned
 // monotonically per repo.
 func (s *CentralStore) CreateMergeRequest(repoID int64, mr *MergeRequest) (*MergeRequest, error) {
 	now := time.Now().UTC().UnixMilli()
-	var iid int64
-	if err := s.d.queryRow(
-		"SELECT COALESCE(MAX(iid),0)+1 FROM merge_requests WHERE repo_id=?", repoID,
-	).Scan(&iid); err != nil {
+	var maxIID *int64
+	if err := s.d.gdb.Model(&mergeRequestRow{}).Where("repo_id=?", repoID).Select("COALESCE(MAX(iid),0)+1").Scan(&maxIID).Error; err != nil {
 		return nil, fmt.Errorf("assign MR iid: %w", err)
 	}
-	res, err := s.d.exec(
-		`INSERT INTO merge_requests(repo_id, iid, title, description, source, target, state, author_id, created, updated)
-		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		repoID, iid, mr.Title, mr.Description, mr.Source, mr.Target, mr.State, nullableInt(mr.AuthorID),
-		now, now,
-	)
-	if err != nil {
+	iid := int64(1)
+	if maxIID != nil {
+		iid = *maxIID
+	}
+	row := &mergeRequestRow{
+		RepoID: repoID, IID: iid, Title: mr.Title, Description: mr.Description,
+		Source: mr.Source, Target: mr.Target, State: mr.State,
+		AuthorID: mr.AuthorID, Created: now, Updated: now,
+	}
+	if err := s.d.gdb.Create(row).Error; err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
 	return &MergeRequest{
-		ID: id, RepoID: repoID, IID: iid, Title: mr.Title, Description: mr.Description,
+		ID: row.ID, RepoID: repoID, IID: iid, Title: mr.Title, Description: mr.Description,
 		Source: mr.Source, Target: mr.Target, State: mr.State, AuthorID: mr.AuthorID,
 		Created: time.UnixMilli(now), Updated: time.UnixMilli(now),
 	}, nil
@@ -445,167 +359,107 @@ func (s *CentralStore) CreateMergeRequest(repoID int64, mr *MergeRequest) (*Merg
 
 // GetMergeRequest returns an MR by repo + iid.
 func (s *CentralStore) GetMergeRequest(repoID, iid int64) (*MergeRequest, error) {
-	var id, authorID int64
-	var title, desc, source, target, state string
-	var created, updated int64
-	var author sql.NullInt64
-	err := s.d.queryRow(
-		`SELECT id, iid, title, description, source, target, state, author_id, created, updated
-		 FROM merge_requests WHERE repo_id=? AND iid=?`,
-		repoID, iid,
-	).Scan(&id, &iid, &title, &desc, &source, &target, &state, &author, &created, &updated)
-	if err == sql.ErrNoRows {
+	var row mergeRequestRow
+	err := s.d.gdb.Where("repo_id=? AND iid=?", repoID, iid).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	if author.Valid {
-		authorID = author.Int64
-	}
 	return &MergeRequest{
-		ID: id, RepoID: repoID, IID: iid, Title: title, Description: desc,
-		Source: source, Target: target, State: state,
-		AuthorID: int64PtrOrNil(authorID, author.Valid),
-		Created:  time.UnixMilli(created), Updated: time.UnixMilli(updated),
+		ID: row.ID, RepoID: row.RepoID, IID: row.IID, Title: row.Title, Description: row.Description,
+		Source: row.Source, Target: row.Target, State: row.State, AuthorID: row.AuthorID,
+		Created: time.UnixMilli(row.Created), Updated: time.UnixMilli(row.Updated),
 	}, nil
 }
 
 // ListMergeRequests returns MRs for a repo, optionally filtered by state.
 func (s *CentralStore) ListMergeRequests(repoID int64, state string) ([]*MergeRequest, error) {
-	q := "SELECT id, iid, title, description, source, target, state, author_id, created, updated FROM merge_requests WHERE repo_id=?"
-	args := []any{repoID}
+	q := s.d.gdb.Where("repo_id=?", repoID)
 	if state != "" {
-		q += " AND state=?"
-		args = append(args, state)
+		q = q.Where("state=?", state)
 	}
-	q += " ORDER BY iid DESC"
-	rows, err := s.d.query(q, args...)
-	if err != nil {
+	var rows []mergeRequestRow
+	if err := q.Order("iid DESC").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*MergeRequest
-	for rows.Next() {
-		var mr MergeRequest
-		var created, updated int64
-		var author sql.NullInt64
-		if err := rows.Scan(&mr.ID, &mr.IID, &mr.Title, &mr.Description, &mr.Source, &mr.Target, &mr.State, &author, &created, &updated); err != nil {
-			return nil, err
-		}
-		if author.Valid {
-			mr.AuthorID = int64PtrOrNil(author.Int64, true)
-		}
-		mr.RepoID = repoID
-		mr.Created = time.UnixMilli(created)
-		mr.Updated = time.UnixMilli(updated)
-		out = append(out, &mr)
+	out := make([]*MergeRequest, 0, len(rows))
+	for i := range rows {
+		out = append(out, &MergeRequest{
+			ID: rows[i].ID, RepoID: rows[i].RepoID, IID: rows[i].IID, Title: rows[i].Title,
+			Description: rows[i].Description, Source: rows[i].Source, Target: rows[i].Target,
+			State: rows[i].State, AuthorID: rows[i].AuthorID,
+			Created: time.UnixMilli(rows[i].Created), Updated: time.UnixMilli(rows[i].Updated),
+		})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // UpdateMergeRequestState updates an MR state (merged/closed/reopen).
 func (s *CentralStore) UpdateMergeRequestState(repoID, iid int64, state string) error {
-	_, err := s.d.exec(
-		"UPDATE merge_requests SET state=?, updated=? WHERE repo_id=? AND iid=?",
-		state, time.Now().UTC().UnixMilli(), repoID, iid,
-	)
-	return err
+	return s.d.gdb.Model(&mergeRequestRow{}).Where("repo_id=? AND iid=?", repoID, iid).Updates(map[string]any{
+		"state": state, "updated": time.Now().UTC().UnixMilli(),
+	}).Error
 }
 
 // AddReview appends a review to an MR.
 func (s *CentralStore) AddReview(mrID int64, reviewerID *int64, state, body string) (*Review, error) {
 	now := time.Now().UTC().UnixMilli()
-	res, err := s.d.exec(
-		"INSERT INTO mr_reviews(mr_id, reviewer_id, state, body, created) VALUES(?,?,?,?,?)",
-		mrID, nullableInt(reviewerID), state, body, now,
-	)
-	if err != nil {
+	row := &mrReviewRow{MRID: mrID, ReviewerID: reviewerID, State: state, Body: body, Created: now}
+	if err := s.d.gdb.Create(row).Error; err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
-	return &Review{ID: id, MRID: mrID, ReviewerID: reviewerID, State: state, Body: body, Created: time.UnixMilli(now)}, nil
+	return &Review{ID: row.ID, MRID: mrID, ReviewerID: reviewerID, State: state, Body: body, Created: time.UnixMilli(now)}, nil
 }
 
 // ListReviews returns reviews for an MR.
 func (s *CentralStore) ListReviews(mrID int64) ([]*Review, error) {
-	rows, err := s.d.query(
-		"SELECT id, reviewer_id, state, body, created FROM mr_reviews WHERE mr_id=? ORDER BY created",
-		mrID,
-	)
-	if err != nil {
+	var rows []mrReviewRow
+	if err := s.d.gdb.Where("mr_id=?", mrID).Order("created").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*Review
-	for rows.Next() {
-		var rv Review
-		var created int64
-		var reviewer sql.NullInt64
-		if err := rows.Scan(&rv.ID, &reviewer, &rv.State, &rv.Body, &created); err != nil {
-			return nil, err
-		}
-		if reviewer.Valid {
-			rv.ReviewerID = int64PtrOrNil(reviewer.Int64, true)
-		}
-		rv.MRID = mrID
-		rv.Created = time.UnixMilli(created)
-		out = append(out, &rv)
+	out := make([]*Review, 0, len(rows))
+	for i := range rows {
+		out = append(out, &Review{ID: rows[i].ID, MRID: rows[i].MRID, ReviewerID: rows[i].ReviewerID, State: rows[i].State, Body: rows[i].Body, Created: time.UnixMilli(rows[i].Created)})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // AddComment appends a comment to an MR.
 func (s *CentralStore) AddComment(mrID int64, authorID *int64, body, path string) (*Comment, error) {
 	now := time.Now().UTC().UnixMilli()
-	res, err := s.d.exec(
-		"INSERT INTO mr_comments(mr_id, author_id, body, path, created) VALUES(?,?,?,?,?)",
-		mrID, nullableInt(authorID), body, path, now,
-	)
-	if err != nil {
+	row := &mrCommentRow{MRID: mrID, AuthorID: authorID, Body: body, Path: strPtr(path), Created: now}
+	if err := s.d.gdb.Create(row).Error; err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
-	return &Comment{ID: id, MRID: mrID, AuthorID: authorID, Body: body, Path: path, Created: time.UnixMilli(now)}, nil
+	return &Comment{ID: row.ID, MRID: mrID, AuthorID: authorID, Body: body, Path: path, Created: time.UnixMilli(now)}, nil
 }
 
 // ListComments returns comments for an MR.
 func (s *CentralStore) ListComments(mrID int64) ([]*Comment, error) {
-	rows, err := s.d.query(
-		"SELECT id, mr_id, author_id, body, path, created FROM mr_comments WHERE mr_id=? ORDER BY created",
-		mrID,
-	)
-	if err != nil {
+	var rows []mrCommentRow
+	if err := s.d.gdb.Where("mr_id=?", mrID).Order("created").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*Comment
-	for rows.Next() {
-		var c Comment
-		var created int64
-		var author sql.NullInt64
-		if err := rows.Scan(&c.ID, &c.MRID, &author, &c.Body, &c.Path, &created); err != nil {
-			return nil, err
+	out := make([]*Comment, 0, len(rows))
+	for i := range rows {
+		path := ""
+		if rows[i].Path != nil {
+			path = *rows[i].Path
 		}
-		if author.Valid {
-			c.AuthorID = int64PtrOrNil(author.Int64, true)
-		}
-		c.Created = time.UnixMilli(created)
-		out = append(out, &c)
+		out = append(out, &Comment{ID: rows[i].ID, MRID: rows[i].MRID, AuthorID: rows[i].AuthorID, Body: rows[i].Body, Path: path, Created: time.UnixMilli(rows[i].Created)})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
-func int64PtrOrNil(v int64, ok bool) *int64 {
-	if !ok {
+
+
+func strPtr(s string) *string {
+	if s == "" {
 		return nil
 	}
-	return &v
+	return &s
 }
 
-func nullableInt(v *int64) any {
-	if v == nil {
-		return nil
-	}
-	return *v
-}
+

@@ -104,10 +104,7 @@ func (w *Workspace) CommitFromChanges(parentHash object.ID, changes []FileChange
 	snap.RevisionHash = snapshotID(snap)
 
 	// Atomic transaction: objects + snapshot + revision.
-	tx, err := w.store.BeginTx()
-	if err != nil {
-		return nil, nil, err
-	}
+	tx := w.store.BeginTx()
 	defer func() { _ = tx.Rollback() }()
 
 	// Write the tree object and any blobs referenced by the tree (leaf blobs).
@@ -128,7 +125,7 @@ func (w *Workspace) CommitFromChanges(parentHash object.ID, changes []FileChange
 	if err := w.store.PutRevisionTx(tx, rev); err != nil {
 		return nil, nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit().Error; err != nil {
 		return nil, nil, err
 	}
 	return snap, rev, nil

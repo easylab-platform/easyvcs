@@ -1,12 +1,14 @@
 package store
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // WorkspaceMarkerFile is the name of the workspace pointer file placed at a
@@ -114,67 +116,55 @@ func (s *CentralStore) PutWorkspace(w *WorkspaceRow) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.d.db.Exec(
-		`INSERT INTO workspaces(path, repo_id, current_revision, branch) VALUES(?,?,?,?)
-		 ON CONFLICT(path) DO UPDATE SET repo_id=excluded.repo_id, current_revision=excluded.current_revision, branch=excluded.branch`,
-		w.Path, repo.repoID, nullable(w.CurrentRevision), nullable(w.Branch),
-	)
-	return err
+	row := &workspaceRow{Path: w.Path, RepoID: repo.repoID, CurrentRevision: nullable(w.CurrentRevision), Branch: nullable(w.Branch)}
+	return s.d.gdb.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "path"}},
+		UpdateAll: true,
+	}).Create(row).Error
 }
 
 // GetWorkspaceByPath looks up a workspace row by path.
 func (s *CentralStore) GetWorkspaceByPath(path string) (*WorkspaceRow, error) {
-	var repoID int64
-	var curRev, branch sql.NullString
-	err := s.d.db.QueryRow("SELECT repo_id, current_revision, branch FROM workspaces WHERE path=?", path).Scan(&repoID, &curRev, &branch)
-	if err == sql.ErrNoRows {
+	var row workspaceRow
+	err := s.d.gdb.Where("path=?", path).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	repo, err := s.repoByID(repoID)
+	repo, err := s.repoByID(row.RepoID)
 	if err != nil {
 		return nil, err
 	}
 	return &WorkspaceRow{
-		Path: path, Repo: repo, CurrentRevision: curRev.String, Branch: branch.String,
+		Path: row.Path, Repo: repo, CurrentRevision: strOrEmpty(row.CurrentRevision), Branch: strOrEmpty(row.Branch),
 	}, nil
 }
 
 // ListWorkspaces returns all registered workspaces.
 func (s *CentralStore) ListWorkspaces() ([]*WorkspaceRow, error) {
-	rows, err := s.d.db.Query("SELECT path, repo_id, current_revision, branch FROM workspaces")
-	if err != nil {
+	var rows []workspaceRow
+	if err := s.d.gdb.Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*WorkspaceRow
-	for rows.Next() {
-		var path string
-		var repoID int64
-		var curRev, branch sql.NullString
-		if err := rows.Scan(&path, &repoID, &curRev, &branch); err != nil {
-			return nil, err
-		}
-		repo, err := s.repoByID(repoID)
+	out := []*WorkspaceRow{}
+	for i := range rows {
+		repo, err := s.repoByID(rows[i].RepoID)
 		if err != nil {
 			continue
 		}
-		out = append(out, &WorkspaceRow{
-			Path: path, Repo: repo, CurrentRevision: curRev.String, Branch: branch.String,
-		})
+		out = append(out, &WorkspaceRow{Path: rows[i].Path, Repo: repo, CurrentRevision: strOrEmpty(rows[i].CurrentRevision), Branch: strOrEmpty(rows[i].Branch)})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *CentralStore) repoByID(id int64) (RepoRef, error) {
-	var ns, name string
-	err := s.d.db.QueryRow("SELECT namespace, name FROM repositories WHERE id=?", id).Scan(&ns, &name)
-	if err != nil {
+	var row repoRow
+	if err := s.d.gdb.Where("id=?", id).First(&row).Error; err != nil {
 		return RepoRef{}, err
 	}
-	return RepoRef{Namespace: ns, Name: name}, nil
+	return RepoRef{Namespace: row.Namespace, Name: row.Name}, nil
 }
 
 // FindRepo walks up from dir to locate the repo a workspace belongs to. It
@@ -195,4 +185,11 @@ func (s *CentralStore) ResolveWorkspace(dir string) (*WorkspaceMarker, *Repo, er
 		return nil, nil, err
 	}
 	return marker, repo, nil
+}
+
+func strOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
