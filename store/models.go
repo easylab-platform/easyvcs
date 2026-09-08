@@ -168,6 +168,24 @@ type mrCommentRow struct {
 	Created  int64 `gorm:"not null"`
 }
 
+// gitRevisionLinkRow records the weak-traceability link between an easyvcs
+// revision and a git commit produced when exporting/importing through the git
+// bridge. It is plain easyvcs metadata (never stored as a .git object); it lets
+// an easyvcs revision be correlated back to a commit sha for the same repo.
+type gitRevisionLinkRow struct {
+	ID         int64  `gorm:"primaryKey;autoIncrement"`
+	RepoID     int64  `gorm:"not null;uniqueIndex:idx_gitlink"`
+	RevisionID string `gorm:"not null;uniqueIndex:idx_gitlink"`
+	CommitSHA  string `gorm:"not null;uniqueIndex:idx_gitlink"`
+	// Ref is the git ref the commit was exported under (e.g. refs/heads/main).
+	Ref string `gorm:"not null;default:''"`
+	// Side is "export" (revision -> git) or "import" (git -> revision).
+	Side    string `gorm:"not null;default:'export';uniqueIndex:idx_gitlink"`
+	Created int64  `gorm:"not null"`
+}
+
+func (gitRevisionLinkRow) TableName() string { return "git_revision_links" }
+
 // allModels returns every table model for AutoMigrate.
 func allModels() []any {
 	return []any{
@@ -175,6 +193,7 @@ func allModels() []any {
 		&refRow{}, &workspaceRow{}, &remoteRow{}, &remoteRefRow{},
 		&userRow{}, &tokenRow{}, &namespaceMemberRow{},
 		&mergeRequestRow{}, &mrReviewRow{}, &mrCommentRow{},
+		&gitRevisionLinkRow{},
 	}
 }
 

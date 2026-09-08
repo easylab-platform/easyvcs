@@ -82,14 +82,18 @@ func TestCLIGitPushLocalRepo(t *testing.T) {
 	os.Args = []string{"easyvcs", "git-push", bare}
 	captureStdout(t, func() { cmdGitPush(c) })
 
-	// Verify the bare repo now has a commit + the file.
-	ls := runGit(t, bare, "log", "--oneline", "-1")
+	// Verify the bare repo now has a commit on 'main' + the file. In a bare
+	// repo we log HEAD (which go-git pushed as refs/heads/main overriding HEAD).
+	ls := runGit(t, bare, "log", "--oneline", "-1", "refs/heads/main")
+	if strings.TrimSpace(ls) == "" {
+		ls = runGit(t, bare, "log", "--oneline", "-1")
+	}
 	if strings.TrimSpace(ls) == "" {
 		t.Fatalf("bare repo has no commits after git-push")
 	}
 	// Clone the bare repo and confirm x.txt content.
 	cloneDir := filepath.Join(t.TempDir(), "clone")
-	cmd := exec.Command("git", "clone", "-q", bare, cloneDir)
+	cmd := exec.Command("git", "clone", "-q", "-b", "main", bare, cloneDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("clone bare after push: %v %s", err, out)
 	}
