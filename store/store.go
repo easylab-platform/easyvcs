@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/easylab-platform/easyvcs/object"
@@ -31,6 +32,23 @@ var ErrRepoNotFound = errors.New("store: repository not found")
 
 // DefaultDBFile is the file name of the central database inside the home dir.
 const DefaultDBFile = "easyvcs.db"
+
+// SnapshotHashFor computes the content-addressed revision hash for a snapshot.
+// It is the store-level canonical form (matching the revision package's
+// snapshotID): the hash is derived from the revision id, tree, parents,
+// description, and author. It is exported so the store can recompute a hash
+// when re-keying a snapshot (e.g. forked revisions get a fresh identity).
+func SnapshotHashFor(s *Snapshot) object.ID {
+	var b strings.Builder
+	fmt.Fprintf(&b, "revision=%s\n", s.RevisionID)
+	fmt.Fprintf(&b, "tree=%s\n", s.TreeID)
+	fmt.Fprintf(&b, "description=%s\n", s.Description)
+	fmt.Fprintf(&b, "author=%s\n", s.Author)
+	for _, p := range s.Parents {
+		fmt.Fprintf(&b, "parent=%s\n", p)
+	}
+	return object.BlobID([]byte(b.String()))
+}
 
 // RepoRef uniquely identifies a repository within the central store.
 type RepoRef struct {

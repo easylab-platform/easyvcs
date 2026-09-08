@@ -32,6 +32,11 @@ type Bundle struct {
 	Snapshots []*store.Snapshot `json:"snapshots"`
 	Refs      []*store.Ref      `json:"refs"`
 	Objects   []ObjectRecord    `json:"objects"`
+	// ExpectedRefs, when set on a push, carries the client's assumption of the
+	// server's current branch targets. The server uses it to reject a
+	// non-fast-forward update (see CheckNonFastForward). Omit-empty keeps the
+	// wire format backward compatible.
+	ExpectedRefs []*store.Ref `json:"expected_refs,omitempty"`
 }
 
 // ObjectRecord is an encoded content-addressed object.
@@ -43,12 +48,13 @@ type ObjectRecord struct {
 // binHeader describes the JSON-encoded metadata of a binary bundle, followed by
 // the concatenated raw object payloads.
 type binHeader struct {
-	Version   int               `json:"version"`
-	Repo      store.RepoRef     `json:"repo"`
-	Revisions []*store.Revision `json:"changes"`
-	Snapshots []*store.Snapshot `json:"snapshots"`
-	Refs      []*store.Ref      `json:"refs"`
-	Objects   []binObject       `json:"objects"`
+	Version      int               `json:"version"`
+	Repo         store.RepoRef     `json:"repo"`
+	Revisions    []*store.Revision `json:"changes"`
+	Snapshots    []*store.Snapshot `json:"snapshots"`
+	Refs         []*store.Ref      `json:"refs"`
+	Objects      []binObject       `json:"objects"`
+	ExpectedRefs []*store.Ref      `json:"expected_refs,omitempty"`
 }
 
 // binObject records an object descriptor (kind + payload length) in a binary
@@ -72,6 +78,7 @@ func (b *Bundle) MarshalBinary() ([]byte, error) {
 		header.Objects = append(header.Objects, binObject{Kind: int(ob.Kind), Len: len(ob.Content)})
 		body.Write(ob.Content)
 	}
+	header.ExpectedRefs = b.ExpectedRefs
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
 		return nil, err
@@ -125,6 +132,7 @@ func UnmarshalBinary(data []byte) (*Bundle, error) {
 	b := &Bundle{
 		Version: header.Version, Repo: header.Repo,
 		Revisions: header.Revisions, Snapshots: header.Snapshots, Refs: header.Refs,
+		ExpectedRefs: header.ExpectedRefs,
 	}
 	offset := 0
 	for _, od := range header.Objects {

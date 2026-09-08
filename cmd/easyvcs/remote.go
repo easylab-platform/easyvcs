@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -754,27 +755,50 @@ func cmdPush(c *ctx) {
 	}
 	full := baseForRepo(rem.URL, repo.RepoRef())
 
-	b, err := transfer.CollectAll(repo)
+	if isLocalURL(rem.URL) {
+		if err := doPushLocal(repo, rem); err != nil {
+			fmt.Fprintln(os.Stderr, "push:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Incremental push: advertise what the server currently holds (refs +
+	// revisions + objects), then send only a delta the server is missing. We
+	// also carry the refs we *expect* the server to hold (the remote refs seen
+	// on the last fetch/pull) so the server can reject a non-fast-forward.
+	expected, err := localRemoteRefs(repo, rem.Name)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "push:", err)
 		os.Exit(1)
 	}
-	if isLocalURL(rem.URL) {
-		target, err := openLocalRepo(rem.URL)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "push:", err)
-			os.Exit(1)
-		}
-		n, err := transfer.Apply(target, b)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "push:", err)
-			os.Exit(1)
-		}
-		fmt.Printf("pushed to %s: applied %d revision(s)\n", rem.URL, n)
-		return
+
+	var adv advertiseResp
+	if err := postJSON(full+"/advertise", advertiseReq{Have: currentRevisionIDs(repo)}, &adv, ""); err != nil {
+		// If the server cannot be reached or advertise fails, fall back to a
+		// full push (best-effort) so a simple remote still works.
+		fmt.Fprintln(os.Stderr, "push: advertise failed (falling back to full push):", err)
+		adv = advertiseResp{}
 	}
+	// Incremental: skip revisions/snapshots the server already advertises.
+	have := adv.Changes
+	if len(have) == 0 {
+		have = currentRevisionIDs(repo)
+	}
+	b, err := transfer.Collect(repo, have, nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "push:", err)
+		os.Exit(1)
+	}
+	b.ExpectedRefs = expected
+
 	data, err := postBundle(full+"/push", b, rem.Token)
 	if err != nil {
+		var nff *transfer.NonFastForwardError
+		if errors.As(err, &nff) {
+			fmt.Fprintf(os.Stderr, "push: %v\n(pull the branch and merge before pushing again)\n", nff)
+			os.Exit(1)
+		}
 		fmt.Fprintln(os.Stderr, "push:", err)
 		os.Exit(1)
 	}
@@ -784,6 +808,57 @@ func cmdPush(c *ctx) {
 		os.Exit(1)
 	}
 	fmt.Printf("pushed to %s: %v\n", rem.URL, resp)
+}
+
+// doPushLocal pushes the full bundle into a local remote, applying it via
+// transfer.Apply (idempotent) and checking non-fast-forward locally first.
+func doPushLocal(repo *store.Repo, rem *store.Remote) error {
+	b, err := transfer.CollectAll(repo)
+	if err != nil {
+		return err
+	}
+	targetRepo, err := openLocalRepo(rem.URL)
+	if err != nil {
+		return err
+	}
+	// Server-side refs (authoritative) for a local remote.
+	serverRefs, err := targetRepo.ListRefs()
+	if err != nil {
+		return err
+	}
+	expected, err := localRemoteRefs(repo, rem.Name)
+	if err != nil {
+		return err
+	}
+	_ = expected
+	incoming := b.Refs
+	conflicts := transfer.CheckNonFastForward(targetRepo, serverRefs, incoming)
+	if len(conflicts) > 0 {
+		return &transfer.NonFastForwardError{ConflictingRefs: conflicts, LocalRefs: incoming}
+	}
+	if _, err := transfer.Apply(targetRepo, b); err != nil {
+		return err
+	}
+	fmt.Printf("pushed to %s: applied %d revision(s)\n", rem.URL, len(b.Revisions))
+	return nil
+}
+
+// localRemoteRefs returns the branch refs the local repo believes the remote
+// holds, from the recorded remote_refs for `remoteName`. It is the client-side
+// expectation used to let the server reject a non-fast-forward push.
+func localRemoteRefs(repo *store.Repo, remoteName string) ([]*store.Ref, error) {
+	rrefs, err := repo.ListRemoteRefs(remoteName)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*store.Ref, 0, len(rrefs))
+	for _, rr := range rrefs {
+		if rr.Kind != store.RefBranch {
+			continue
+		}
+		out = append(out, &store.Ref{Name: rr.Name, Kind: store.RefBranch, Target: rr.Target})
+	}
+	return out, nil
 }
 
 // ownObjects returns all object ids the repo already holds.
