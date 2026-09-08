@@ -233,12 +233,12 @@ EasyLab 把「代码托管 + 制品仓库 + 容器构建/启动」收进一个�
 
 ### 14.5 可切换后端（为横扩/集群化铺路）
 
-EasyLab 的存储边界已抽象为可切换，语义层（revision/merge/transfer/pkrkit）零改动：
+EasyLab 的存储边界已抽象为可切换，语义层（revision/merge/transfer/artifactkit）零改动：
 
 | 层 | 接口 | 后端开关 |
 |---|---|---|
 | 元数据 | `CentralStore` | `EASYVCS_DB_DRIVER=sqlite\|postgres`，`EASYVCS_DB_DSN` |
-| 对象/blob | pkrkit `BlobStore` | `EASYVCS_BLOB_BACKEND=sqlite\|s3`（s3 为占位） |
+| 对象/blob | artifactkit `BlobStore` | `EASYVCS_BLOB_BACKEND=sqlite\|s3`（s3 为占位） |
 
 - `internal/store/driver.go`：`DriverConfig{Kind,DSN}` + `OpenDriver`；`rebindPostgres` 把 `?`→`$n`；
   `SetWAL`/`migrateRepoColumns` 按 kind 分支。
@@ -268,6 +268,6 @@ nats-server (JetStream · :14222)   ← 内嵌消息/事件总线
 - 动态插拔：起停 `easyvcs-code`/`easyvcs-ops` 程序组即可，agent 下次 `discover` 自动感知。
 - supervisord 组：`nats`、`easyvcs-code`(:18091)、`easyvcs-ops`(:18092)、`easylab`(:18160)，全部常驻。
 
-未开放（按决策后置）：历史重写（rebase/squash/resolve/merge）、MR、发布(pkrkit package)、browser/helm。
+未开放（按决策后置）：历史重写（rebase/squash/resolve/merge）、MR、发布(artifactkit package)、browser/helm。
 
 
