@@ -10,7 +10,7 @@ import (
 )
 
 func cmdGitPull(c *ctx) {
-	gitURLOrDir, branch, token, sshKey, pass := parseGitArgs("git-pull", true)
+	gitURLOrDir, branch, token, sshKey, pass, _ := parseGitArgs("git-pull", true)
 	if gitURLOrDir == "" {
 		fmt.Fprintln(os.Stderr, "usage: git-pull <git-repo-or-url> [BRANCH] [--token <t>] [--ssh-key <file>] [--passphrase <p>]")
 		os.Exit(1)
@@ -62,7 +62,7 @@ func cmdGitPull(c *ctx) {
 }
 
 func cmdGitPush(c *ctx) {
-	gitDest, branch, token, sshKey, pass := parseGitArgs("git-push", true)
+	gitDest, branch, token, sshKey, pass, squash := parseGitArgs("git-push", true)
 	if gitDest == "" {
 		fmt.Fprintln(os.Stderr, "usage: git-push <git-repo-or-url> [BRANCH] [--token <t>] [--ssh-key <file>] [--passphrase <p>]")
 		os.Exit(1)
@@ -119,6 +119,7 @@ func cmdGitPush(c *ctx) {
 		Dest: gitDest, Branch: branch, Revisions: chain,
 		Author: store.Author{Name: "easyvcs", Email: "easyvcs@example.com"},
 		Token:  token, SSHKey: sshKey, SSHKeyPassphrase: pass,
+		Tags: collectTags(ws, repo), Squash: squash,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "git-push:", err)
@@ -127,16 +128,36 @@ func cmdGitPush(c *ctx) {
 	fmt.Printf("pushed %d revision(s) to git %s (branch %s)\n", len(shas), gitDest, branch)
 }
 
+// collectTags returns the repo's immutable tags (name -> revision id) so the
+// git-push exports them as light git tags alongside the branch commits.
+func collectTags(ws *revision.Workspace, repo *store.Repo) []gitbridge.TagRef {
+	refs, err := ws.ListRefs()
+	if err != nil {
+		return nil
+	}
+	var out []gitbridge.TagRef
+	for _, r := range refs {
+		if r.Kind == store.RefTag {
+			out = append(out, gitbridge.TagRef{Name: r.Name, Rev: r.Target})
+		}
+	}
+	return out
+}
+
 // parseGitArgs walks args after the URL and returns (url, branch, token,
-// sshKey, passphrase). It supports "<url> [branch]" plus --token/--ssh-key/
-// --passphrase. When allowBranch is true and no branch is given the default is
-// "main".
-func parseGitArgs(cmd string, allowBranch bool) (url, branch, token, sshKey, pass string) {
+// sshKey, passphrase, squash). It supports "<url> [branch]" plus
+// --token/--ssh-key/--passphrase/--squash. When allowBranch is true and no
+// branch is given the default is "main".
+func parseGitArgs(cmd string, allowBranch bool) (url, branch, token, sshKey, pass string, squash bool) {
 	args := os.Args[2:]
 	branch = "main"
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		// flags consume a following value; skip both.
+		// flags consume a following value; skip both. Honor --squash here.
+		if a == "--squash" || a == "-squash" {
+			squash = true
+			continue
+		}
 		if isGitFlag(a) {
 			i++
 			continue

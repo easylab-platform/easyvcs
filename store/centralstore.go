@@ -56,9 +56,61 @@ func (s *CentralStore) SetWAL() error {
 	return nil
 }
 
+// cleanupStaleColumns drops columns that a previous schema shipped but the
+// current models no longer declare. Without this, GORM's SQLite migrator
+// rebuilds the table (create `<table>__temp`) and the column-mapping rewrite
+// can violate a NOT NULL constraint while copying rows — a hard startup
+// failure on any pre-bookmark DB. We drop them with native DDL first (out of
+// band, not via the migrator) so AutoMigrate sees a clean target.
+//
+// Dropped columns are semantically obsolete: the "bookmark" concept was
+// replaced by "branch"; the live value lives in default_branch / id.
+func (s *CentralStore) cleanupStaleColumns() error {
+	if !s.d.isSQLite() {
+		return nil
+	}
+	// Each entry: (table, staleColumn). DROP COLUMN requires the column to
+	// exist; guard on PRAGMA table_info so a fresh DB (column absent) is a
+	// no-op and an already-migrated DB is idempotent.
+	stale := [][2]string{
+		{"repositories", "default_bookmark"},
+		{"workspaces", "bookmark"},
+	}
+	for _, c := range stale {
+		table, col := c[0], c[1]
+		var exists bool
+		if err := s.d.gdb.Raw(
+			"SELECT EXISTS (SELECT 1 FROM pragma_table_info(?) WHERE name = ?)",
+			table, col,
+		).Scan(&exists).Error; err != nil {
+			// pragma_table_info is supported on SQLite 3.16+; on failure, fall
+			// back to a tolerant SELECT from sqlite_master.
+			if err2 := s.d.gdb.Raw(
+				"SELECT EXISTS (SELECT 1 FROM pragma_table_info(s.name) WHERE p.name = ?) FROM pragma_table_info(?) s",
+			).Error; err2 != nil {
+				return err
+			}
+		}
+		if !exists {
+			continue
+		}
+		// Column exists in this table; drop it. Wrapped so a concurrent or
+		// already-migrated DB that races with us still converges.
+		if err := s.d.gdb.Exec("ALTER TABLE " + table + " DROP COLUMN " + col).Error; err != nil {
+			// Some SQLite builds (pre-3.35) can't DROP COLUMN; shrinking the
+			// scope: if it fails, that's a hard upgrade requirement. Surface it.
+			return fmt.Errorf("drop stale column %s.%s: %w", table, col, err)
+		}
+	}
+	return nil
+}
+
 // Init creates the schema via GORM AutoMigrate, generating portable DDL
 // (sqlite / postgres / mysql). Idempotent.
 func (s *CentralStore) Init() error {
+	if err := s.cleanupStaleColumns(); err != nil {
+		return err
+	}
 	return s.d.gdb.AutoMigrate(allModels()...)
 }
 
@@ -409,6 +461,13 @@ func (r *Repo) ObjectExists(id object.ID) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// DeleteObject removes a single content-addressed object (global). It is used
+// by the GC command to prune objects no longer referenced by any snapshot. The
+// caller is responsible for reachability analysis.
+func (r *Repo) DeleteObject(id object.ID) error {
+	return r.cs.d.gdb.Where("sha=?", id.String()).Delete(&objectRow{}).Error
 }
 
 // PutSnapshot stores a snapshot scoped to this repository. Parents, author, and

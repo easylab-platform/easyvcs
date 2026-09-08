@@ -127,3 +127,89 @@ func TestIsScpLike(t *testing.T) {
 		t.Fatal("local path is not scp-like")
 	}
 }
+
+func TestExportImportTags(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("EASYVCS_HOME", home)
+	cs, _ := store.OpenDefault()
+	defer cs.Close()
+	repoA, _ := cs.Create(store.RepoRef{Namespace: "a", Name: "r"})
+	wsA := revision.NewWorkspace(repoA)
+	_, r1, err := wsA.CommitFromChanges(object.ID{}, []revision.FileChangeSpec{{Path: "a.txt", Content: []byte("1")}}, "one", store.Author{Name: "t"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s1, _ := wsA.GetSnapshot(r1.Hash)
+	_, r2, err := wsA.CommitFromChanges(s1.RevisionHash, []revision.FileChangeSpec{{Path: "b.txt", Content: []byte("2")}}, "two", store.Author{Name: "t"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s1
+	// tag v1 -> r2.
+	if _, err := wsA.SetRef("v1", store.RefTag, r2.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir() + "/dest.git"
+	_ = exportBare(dest)
+	if _, err := ExportRevisions(wsA, repoA, PushOptions{
+		Dest: dest, Branch: "main", Revisions: []string{r1.ID, r2.ID},
+		Author: store.Author{Name: "t", Email: "t@x"},
+		Tags:   []TagRef{{Name: "v1", Rev: r2.ID}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Import into a fresh repo B; the tag should land as an easyvcs tag on the
+	// revision for v1's commit.
+	homeB := t.TempDir()
+	t.Setenv("EASYVCS_HOME", homeB)
+	csB, _ := store.OpenDefault()
+	defer csB.Close()
+	repoB, _ := csB.Create(store.RepoRef{Namespace: "b", Name: "r"})
+	wsB := revision.NewWorkspace(repoB)
+	if _, err := ImportBranch(wsB, repoB, ImportOptions{Source: dest, Branch: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	tag, err := wsB.GetRef("v1")
+	if err != nil || tag == nil || tag.Kind != store.RefTag {
+		t.Fatalf("tag v1 not imported: %v", err)
+	}
+	// The tag must point at a real revision (it reuses the header id of r2, so
+	// in a fresh repo it gets a NEW id but the tag still exists).
+	if _, err := wsB.GetRevision(tag.Target); err != nil {
+		t.Fatalf("tag target revision %s missing: %v", tag.Target, err)
+	}
+}
+
+func TestExportSquash(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("EASYVCS_HOME", home)
+	cs, _ := store.OpenDefault()
+	defer cs.Close()
+	repoA, _ := cs.Create(store.RepoRef{Namespace: "a", Name: "r"})
+	wsA := revision.NewWorkspace(repoA)
+	_, r1, err := wsA.CommitFromChanges(object.ID{}, []revision.FileChangeSpec{{Path: "a.txt", Content: []byte("1")}}, "one", store.Author{Name: "t"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s1, _ := wsA.GetSnapshot(r1.Hash)
+	_, r2, err := wsA.CommitFromChanges(s1.RevisionHash, []revision.FileChangeSpec{{Path: "b.txt", Content: []byte("2")}}, "two", store.Author{Name: "t"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s1
+
+	dest := t.TempDir() + "/dest.git"
+	_ = exportBare(dest)
+	shas, err := ExportRevisions(wsA, repoA, PushOptions{
+		Dest: dest, Branch: "main", Revisions: []string{r1.ID, r2.ID},
+		Author: store.Author{Name: "t", Email: "t@x"}, Squash: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shas) != 1 {
+		t.Fatalf("squash should export a single commit, got %d", len(shas))
+	}
+}

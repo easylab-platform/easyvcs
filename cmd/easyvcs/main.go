@@ -51,6 +51,10 @@ Revisions:
   resolve <revision> <path> [--side N]  resolve a conflict to a chosen side
   message <revision> <text>    rewrite a revision's commit message (id stable)
 
+Maintenance:
+  gc [--dry-run]            prune unreferenced objects (whole store)
+  verify                   check object/snapshot consistency
+
 References:
   branch <name> <revision> [DIR]  derive a mutable branch -> independent revision
   tag <name> <revision> [DIR]       set an immutable tag -> revision
@@ -156,6 +160,10 @@ func main() {
 		cmdTag(c)
 	case "refs":
 		cmdRefs(c)
+	case "gc":
+		cmdGC(c)
+	case "verify":
+		cmdVerify(c)
 	case "diff":
 		cmdDiff(c)
 	case "export":
@@ -1079,6 +1087,39 @@ func cmdRefs(c *ctx) {
 	}
 	for _, r := range refs {
 		fmt.Printf("%s  %s -> revision %s\n", r.Kind, r.Name, short(r.Target))
+	}
+}
+
+func cmdGC(c *ctx) {
+	dry := false
+	for _, a := range os.Args[2:] {
+		if a == "--dry-run" || a == "-dry-run" || a == "-n" {
+			dry = true
+		}
+	}
+	res, err := revision.GCRun(c.cs, revision.GCOptions{DryRun: dry})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gc:", err)
+		os.Exit(1)
+	}
+	if dry {
+		fmt.Printf("gc (dry-run): %d object(s) present, %d would be pruned\n", res.Total, res.Swept)
+	} else {
+		fmt.Printf("gc: %d object(s) scanned, pruned %d\n", res.Total, res.Swept)
+	}
+}
+
+func cmdVerify(c *ctx) {
+	res, err := revision.Verify(c.cs)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "verify:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("verify: repos=%d revisions=%d snapshots=%d objects=%d missing_objects=%d broken_snapshots=%d\n",
+		res.Repos, res.Revisions, res.Snapshots, res.Objects, res.MissingObjects, res.BrokenSnapshots)
+	if res.MissingObjects > 0 || res.BrokenSnapshots > 0 {
+		fmt.Fprintln(os.Stderr, "verify: FAILED — dangling objects or broken snapshots found")
+		os.Exit(1)
 	}
 }
 

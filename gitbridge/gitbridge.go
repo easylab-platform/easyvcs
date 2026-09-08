@@ -34,14 +34,24 @@ type PushOptions struct {
 	Dest      string
 	Branch    string
 	Revisions []string
-	Author    store.Author
-	Token     string
+	// Tags, if set, are exported as lightweight git tags (refs/tags/<name>)
+	// pointing at the tip commit of each revision.
+	Tags []TagRef
+	Author store.Author
+	Token string
 	// SSHKey, when set (a path to a PEM private key), authenticates ssh:// and
 	// git@host remotes via public key. When empty, an SSH agent is used.
 	SSHKey string
 	// SSHKeyPassphrase, if the SSHKey is encrypted.
 	SSHKeyPassphrase string
-	Squash           bool
+	// Squash, when true, collapses every revision into a single commit.
+	Squash bool
+}
+
+// TagRef is a git tag name -> easyvcs revision id to export as refs/tags/<name>.
+type TagRef struct {
+	Name string
+	Rev  string
 }
 
 // ImportOptions configures a pull.
@@ -60,6 +70,11 @@ type ImportOptions struct {
 // force-pushes the branch, so it is idempotent for the exported tip. EasyVCS's
 // own object store is never written as git objects — git only exists here in a
 // temporary worktree.
+//
+// When opts.Squash is true, all revisions are collapsed into a single commit
+// (whose tree is the newest revision's snapshot). When opts.Tags is non-empty,
+// each entry is exported as a lightweight git tag refs/tags/<name> pointing at
+// the commit that exported the revision.
 func ExportRevisions(ws *revision.Workspace, repo *store.Repo, opts PushOptions) ([]string, error) {
 	dir, err := os.MkdirTemp("", "easyvcs-gitbridge-*")
 	if err != nil {
@@ -76,15 +91,39 @@ func ExportRevisions(ws *revision.Workspace, repo *store.Repo, opts PushOptions)
 	}
 
 	var shas []string
-	for _, rid := range opts.Revisions {
-		sha, err := exportOneRevision(ws, g, dir, opts, rid)
+	var tagTarget = map[string]string{} // tag name -> commit sha
+
+	if opts.Squash {
+		// Collapse: export only the newest revision as the single final commit,
+		// applying its full snapshot (its own tree already contains all history).
+		sha, err := exportOneRevision(ws, g, dir, opts, opts.Revisions[len(opts.Revisions)-1])
 		if err != nil {
 			return nil, err
 		}
-		if err := repo.PutGitLink(rid, sha.String(), RefHeadsPrefix+opts.Branch, "export"); err != nil {
+		shas = append(shas, sha.String())
+		if err := repo.PutGitLink(opts.Revisions[len(opts.Revisions)-1], sha.String(), RefHeadsPrefix+opts.Branch, "export"); err != nil {
 			return nil, err
 		}
-		shas = append(shas, sha.String())
+		for _, t := range opts.Tags {
+			tagTarget[t.Name] = sha.String()
+		}
+	} else {
+		for _, rid := range opts.Revisions {
+			sha, err := exportOneRevision(ws, g, dir, opts, rid)
+			if err != nil {
+				return nil, err
+			}
+			if err := repo.PutGitLink(rid, sha.String(), RefHeadsPrefix+opts.Branch, "export"); err != nil {
+				return nil, err
+			}
+			shas = append(shas, sha.String())
+		}
+		// Map each tag to the commit that exported its revision.
+		for _, t := range opts.Tags {
+			if s, ok := shaForRevision(shas, opts, t.Rev); ok {
+				tagTarget[t.Name] = s
+			}
+		}
 	}
 
 	// Rename the default branch to opts.Branch so the commits are under
@@ -97,6 +136,13 @@ func ExportRevisions(ws *revision.Workspace, repo *store.Repo, opts PushOptions)
 	if err := pushBranch(g, opts); err != nil {
 		return nil, err
 	}
+	// Export tags as lightweight refs/tags/<name> (annotated-free). We create
+	// them in the temp repo then push each tag ref explicitly.
+	if len(tagTarget) > 0 {
+		if err := exportTags(g, opts, tagTarget); err != nil {
+			return nil, err
+		}
+	}
 	// If the destination is a local path, point its HEAD at the pushed branch so
 	// a subsequent clone/fetch sees a valid default branch (a bare repo pushed
 	// with go-git keeps its original unborn HEAD otherwise).
@@ -104,6 +150,44 @@ func ExportRevisions(ws *revision.Workspace, repo *store.Repo, opts PushOptions)
 		_ = setDestHEAD(opts.Dest, opts.Branch)
 	}
 	return shas, nil
+}
+
+// shaForRevision returns the exported commit sha for a revision id from the
+// shas produced for the ordered revisions.
+func shaForRevision(shas []string, opts PushOptions, revID string) (string, bool) {
+	for i, rid := range opts.Revisions {
+		if rid == revID && i < len(shas) {
+			return shas[i], true
+		}
+	}
+	return "", false
+}
+
+// exportTags writes each tag as a lightweight reference and force-pushes it.
+func exportTags(g *git.Repository, opts PushOptions, tagTarget map[string]string) error {
+	auth, err := authFor(opts.Dest, opts.Token, opts.SSHKey, opts.SSHKeyPassphrase)
+	if err != nil {
+		return err
+	}
+	for name, sha := range tagTarget {
+		ref := plumbing.NewTagReferenceName(name)
+		id := plumbing.NewHash(sha)
+		if err != nil {
+			return err
+		}
+		if err := g.Storer.SetReference(plumbing.NewHashReference(ref, id)); err != nil {
+			return err
+		}
+		if err := g.Push(&git.PushOptions{
+			RemoteName: "origin",
+			RefSpecs:   []config.RefSpec{config.RefSpec(ref.String() + ":" + ref.String())},
+			Force:      true,
+			Auth:       auth,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // isLocalPath reports whether a dest/source string is a local filesystem path.
@@ -201,7 +285,44 @@ func ImportBranch(ws *revision.Workspace, repo *store.Repo, opts ImportOptions) 
 		}
 		parentSnapID = rev.Hash
 	}
+	// Import lightweight git tags (refs/tags/*) as easyvcs immutable tags,
+	// pointing at the imported revision for the commit each tag references.
+	if err := importTags(ws, repo, g); err != nil {
+		return out, err
+	}
 	return out, nil
+}
+
+// importTags reads the clone's tags (refs/tags/*) and, for each, creates an
+// easyvcs immutable tag pointing at the revision imported from that tag's commit
+// (if we imported it). Unknown commits are skipped.
+func importTags(ws *revision.Workspace, repo *store.Repo, g *git.Repository) error {
+	refs, err := g.References()
+	if err != nil {
+		return err
+	}
+	defer refs.Close()
+	err = refs.ForEach(func(ref *plumbing.Reference) error {
+		if !strings.HasPrefix(ref.Name().String(), RefTagsPrefix) {
+			return nil
+		}
+		name := strings.TrimPrefix(ref.Name().String(), RefTagsPrefix)
+		// The tag points at a commit; find the revision we imported for it.
+		rid, err := repo.RevisionForGitCommit(ref.Hash().String())
+		if err != nil {
+			return err
+		}
+		if rid == "" {
+			return nil // commit not imported; skip
+		}
+		// Create/keep an immutable tag (re-tagging an existing name is refused).
+		if _, err := ws.SetRef(name, store.RefTag, rid); err != nil {
+			// Tag already exists — ignore (immutable).
+			_ = err
+		}
+		return nil
+	})
+	return err
 }
 
 

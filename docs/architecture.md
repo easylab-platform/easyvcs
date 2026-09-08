@@ -47,55 +47,48 @@ Object (内容寻址，不可变)
 
 ## 4. 存储抽象（关键架构）
 
-通过 `store.Store` 接口将**语义层**与**存储后端**解耦。同一套 change/merge 逻辑可跑在不同后端上。
+通过 `store.RepoStore` 接口将**语义层**与**存储后端**解耦。同一套 revision/merge 逻辑可跑在不同后端上。当前唯一后端是 **GORM**，支持 SQLite（默认，纯 Go）、Postgres、MySQL/MariaDB——均由 `store.OpenDriver(DriverConfig{Kind,DSN})` 选择（共享 `EASYVCS_DB_DRIVER`/`EASYVCS_DB_DSN`）。
 
 ```
-┌─ 语义层（change 包）  与存储无关 ─────────────────────┐
-│  change.Workspace: Commit / Rebase / Merge / Log     │
+┌─ 语义层（revision 包）  与存储无关 ─────────────────────┐
+│  revision.Workspace: Commit / Rebase / Merge / Log     │
 └────────────────────▲────────────────────────────────┘
-                     │ store.Store 接口
-        ┌────────────┴───────────────────┐
-        │                                  │
-   FileStore (本地)               SqlStore (server)
-   .easyvcs/ 目录                SQLite(默认)/Postgres
-   对象不可变+原子rename            database/sql, 无cgo
+                     │ store.RepoStore 接口 (GORM)
+         ┌────────────┴───────────────────┐
+         │                                  │
+    sqlite (default, glebarez/modernc)   postgres / mysql
+    纯 Go，无 cgo；同一 schema            dialect 由 GORM 生成
 ```
 
-### 目录布局（FileStore）
+### DB Schema（GORM AutoMigrate，单一 schema 三库通用）
 ```
-<repo>/.easyvcs/
-├── objects/      ← 内容寻址对象（不可变，blake3 文件名）
-├── snapshots/    ← snapshot 元数据 json
-├── changes/      ← change 元数据 json
-└── refs/         ← bookmark/tag
+objects(sha PK, kind, content BLOB)          -- 内容寻址，可去重，存 DB
+snapshots(repo_id,sha,revision_id,tree_id,commit_time,meta BLOB)
+revisions(repo_id,id,hash,created,fork_from,changed_paths)
+refs(repo_id,name,kind,target)               -- branch/tag
+remotes / remote_refs / workspaces / push_mirrors
+users / tokens / namespace_members / merge_requests / mr_reviews / mr_comments
+git_revision_links  -- 与 git commit 的弱追溯映射
 ```
-- **objects 不可变只增**：`rsync`/`Dropbox` 同步安全（jj 同设计）。
-- **元数据原子写**：`tmp + rename`，并发不会读到半截文件。
+- SQLite/Postgres/MySQL 同一 schema（GORM AutoMigrate 生成方言 DDL），无 cgo，无 `.git` 对象存储。
+- 本地 sqlite 用单 `.db` 文件；server 可换 Postgres/MySQL。
 
-### DB Schema（SqlStore）
-```
-objects(sha PK, kind, content BLOB)          -- 内容寻址，可去重
-snapshots(sha PK, change_id, parents, tree_id, description, author, commit_time)
-changes(id PK, current, created)
-refs(name PK, kind, target)
-```
-- SQLite/Postgres 同一 schema（标准类型 + `database/sql`），无 cgo。
-- 本地用一个 `.db` 文件（SQLite 本身就是文件）；server 换 Postgres。
+## 5. 后端实现选择（多态 RepoStore）
 
-## 5. 后端实现选择（多态 Store）
-
-`store.Store` 接口（internal/store/store.go）：
+`store.RepoStore` 接口（store/store.go）：
 - `WriteObject/ReadObject/ObjectExists`
 - `PutSnapshot/GetSnapshot`
-- `PutChange/GetChange/UpdateChangeCurrent/ListChanges`
-- `PutRef/DeleteRef/GetRef/ListRefs`
-- `Init/Close`
+- `PutRevision/GetRevision/UpdateRevisionHash[+CAS]/ListRevisions`
+- `PutRef/DeleteRef/GetRef/ListRefs`（branch/tag）
+- `BeginTx`/`WriteObjectsBatchTx`/`PutSnapshotTx`/`PutRevisionTx`
+- `Close`
 
-实现：
+实现（单一 GORM，按 Kind 选方言）：
 | 实现 | 用途 |
 |---|---|
-| `FileStore` | 本地 `.easyvcs/` 目录（默认） |
-| `SqlStore` | SQLite（`OpenSqlite`）/ Postgres（`OpenPostgres`），同接口 |
+| `GORM(sqlite)` | 本地默认（`glebarez/sqlite`，纯 Go） |
+| `GORM(postgres)` | server / 集群（pgx） |
+| `GORM(mysql)` | MariaDB（go-sql-driver），`mariadb` 别名 |
 
 ## 6. 语义操作
 
@@ -183,15 +176,30 @@ GET  /log / /refs / /change/{id} / /diff/{a}/{b}
 ## 12. 与 jj「文件能否存 DB」的相回回应
 
 - jj 目前只实现 `SimpleBackend`（文件）+ `GitBackend`，**没有 SQL 版**，但 `Backend` trait 预留了插槽。
-- EasyVCS 从第一天就用 `Store` 接口，同提供 `FileStore` + `SqlStore`，因此**天然支持 SQLite/Postgres**。
-- 由于不兼容 Git，EasyVCS 可把内容本体（tree/blob）也放进 DB，比 jj 更彻底（jj 的 Git 模式必须保持 `.git` 对象格式才不失互操）。
+- EasyVCS 只用 `store.RepoStore`（GORM），同时提供 sqlite/postgres/mysql，**天然支持它们**；内容本体（tree/blob）也进 DB。
+- 不兼容 Git 的优势：EasyVCS 可直接把 tree/blob 存 DB；与 Git 的互操作通过独立的 `gitbridge`（go-git，smart protocol）完成，`.git` 对象从不作为 easyvcs 存储。
 
 ## 13. 构建
 
 ```
 CGO_ENABLED=0 go build -o easyvcs ./cmd/easyvcs
-CGO_ENABLED=0 go build -o easylab ./cmd/easylab
+CGO_ENABLED=0 go build -o easyvcs-server ./cmd/server
 ```
+
+## 13.1 Git 互操作（gitbridge）
+
+EasyVCS 通过 **go-git** 与真实 git 仓库走 **smart protocol** 互操作（无 cgo、不存 `.git` 对象）：
+
+- `git-push <url> [branch] [--token][--ssh-key][--passphrase][--squash]`：
+  把分支 tip 的 revision 序列导成 git commit，`revision: <id>` 写入 commit message
+  作弱追溯；`--squash` 折叠为单 commit；仓库的不可变 tag 导出为 `refs/tags/`。
+- `git-pull <url> [branch] [...]`：把远端 commit 逐条导入为 revision（读回
+  `revision:` 头；未知名则生成新 revision id）。
+
+## 13.2 维护命令
+
+- `gc [--dry-run]`：回收未被任何 snapshot 引用的孤儿对象（内容寻址只增）。
+- `verify`：一致性校验（snapshot 树可读、引用对象存在）。
 
 ## 14. EasyLab 开发/部署平台（ops）
 
