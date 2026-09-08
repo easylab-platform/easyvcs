@@ -35,6 +35,7 @@ const usage = `easyvcs - a revision-native version control system (central-store
 
 Repository / workspace:
   init <ns/name> [DIR]      create a repository and a workspace pointing at it
+  clone <url> [DIR]         clone a remote (http(s):// or a local path) into a new repo + workspace
   workspace attach [DIR]    bind current dir to a repo (auto-forks on mismatch)
   workspace list            list registered workspaces
   repositories              list all repositories in the central store
@@ -106,6 +107,8 @@ func main() {
 	switch cmd {
 	case "init":
 		cmdInit(c)
+	case "clone":
+		cmdClone(c)
 	case "workspace":
 		cmdWorkspace(c)
 	case "repositories":
@@ -180,12 +183,19 @@ func resolveWorkingDir() string {
 }
 
 // loadRepo resolves the workspace for the current directory and returns the
-// repo-scoped handle plus the workspace marker.
+// repo-scoped handle plus the workspace marker. The store the workspace belongs
+// to is opened from the marker's recorded location (Home/DSN), falling back to
+// the process EASYVCS_HOME when the marker does not record one.
 func (c *ctx) loadRepo() (*store.Repo, *store.WorkspaceMarker, error) {
 	marker, err := store.LookupMarker(".")
 	if err != nil {
 		return nil, nil, err
 	}
+	cs, err := store.OpenStoreForMarker(marker)
+	if err != nil {
+		return nil, nil, err
+	}
+	c.cs = cs
 	repo, err := c.cs.OpenRepo(marker.Repo)
 	if err != nil {
 		return nil, nil, err
@@ -218,6 +228,169 @@ func cmdInit(c *ctx) {
 		os.Exit(1)
 	}
 	fmt.Printf("initialized repository %s/%s, workspace bound at %s\n", ns, name, dir)
+}
+
+// cmdClone clones a repository from a remote URL (http(s):// or a local path)
+// into a fresh repository + workspace in the current directory. It registers the
+// remote as "origin", performs the first fetch to record remote refs, and pulls
+// the remote default branch (or an explicit source ref) into the local branch.
+// For a local remote the source repo is identified by the target workspace
+// marker's Home + Repo; for an http(s) URL it talks to the EasyVCS server.
+func cmdClone(c *ctx) {
+	args := os.Args[2:]
+	url := ""
+	var branch string
+	var dir string
+	var namespace string
+	var repoName string
+	destDir := "."
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-b", "--branch":
+			if i+1 < len(args) {
+				branch = args[i+1]
+				i++
+			}
+		case "-d", "--dir":
+			if i+1 < len(args) {
+				destDir = args[i+1]
+				i++
+			}
+		case "-n", "--namespace":
+			if i+1 < len(args) {
+				namespace = args[i+1]
+				i++
+			}
+		default:
+			if url == "" {
+				url = args[i]
+			} else if dir == "" {
+				dir = args[i]
+			}
+		}
+	}
+	if url == "" {
+		fmt.Fprintln(os.Stderr, "usage: clone <url> [DIR] [-b branch] [-n namespace]")
+		os.Exit(1)
+	}
+	if dir != "" {
+		destDir = dir
+	}
+	if destDir == "." {
+		// Default destination directory = last path segment of the URL.
+		base := filepath.Base(strings.TrimRight(expandLocalPath(url), "/"))
+		if base != "" && base != "/" && base != "." {
+			destDir = base
+		}
+	}
+
+	// Determine the source repo ref: for a local path use the target marker's
+	// repo; for an http(s) URL derive it from the path.
+	srcRef := store.RepoRef{}
+	if isLocalURL(url) {
+		m, err := store.LookupMarker(expandLocalPath(url))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "clone:", err)
+			os.Exit(1)
+		}
+		srcRef = m.Repo
+	} else {
+		ns, name := repoRefFromURLPath(url)
+		if ns == "" {
+			ns = "default"
+		}
+		srcRef = store.RepoRef{Namespace: ns, Name: name}
+	}
+	if namespace != "" {
+		srcRef.Namespace = namespace
+	}
+	if repoName != "" {
+		srcRef.Name = repoName
+	}
+
+	// Create the destination repo (fresh central store for the clone).
+	home := store.HomeDir()
+	cs, err := store.OpenDefault()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "clone:", err)
+		os.Exit(1)
+	}
+	dstRepo, err := cs.Create(srcRef)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "clone:", err)
+		os.Exit(1)
+	}
+	if err := dstRepo.PutRemote("origin", url, ""); err != nil {
+		fmt.Fprintln(os.Stderr, "clone:", err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, "clone:", err)
+		os.Exit(1)
+	}
+	if err := store.WriteMarker(destDir, &store.WorkspaceMarker{Repo: dstRepo.RepoRef(), Home: home}); err != nil {
+		fmt.Fprintln(os.Stderr, "clone:", err)
+		os.Exit(1)
+	}
+	if err := cs.PutWorkspace(&store.WorkspaceRow{Path: destDir, Repo: dstRepo.RepoRef(), Branch: branch}); err != nil {
+		fmt.Fprintln(os.Stderr, "clone:", err)
+		os.Exit(1)
+	}
+
+	// Fetch/pull the remote default branch (or explicit branch).
+	var pullErr error
+	if isLocalURL(url) {
+		if err := doFetch(dstRepo, []string{"origin"}); err != nil {
+			fmt.Fprintln(os.Stderr, "clone (fetch):", err)
+		}
+		want := branch
+		if want == "" {
+			if def, _ := dstRepo.GetRemoteDefaultBranch("origin"); def != "" {
+				want = def
+			} else if meta, _ := dstRepo.RepoMeta(); meta.DefaultBranch != "" {
+				want = meta.DefaultBranch
+			}
+		}
+		if want == "" {
+			want = "main"
+		}
+		if err := doPull(dstRepo, []string{"origin", want}); err != nil {
+			pullErr = err
+		}
+	} else {
+		want := branch
+		if want == "" {
+			want = "main"
+		}
+		pullErr = doPull(dstRepo, []string{"origin", want})
+	}
+	if pullErr != nil {
+		fmt.Fprintln(os.Stderr, "clone (pull):", pullErr)
+		os.Exit(1)
+	}
+	fmt.Printf("cloned %s -> %s\n", url, destDir)
+}
+
+// repoRefFromURLPath derives a RepoRef{Namespace,Name} from a url path of the
+// form .../namespace/name or .../name. It is used to name a clone of a (network)
+// remote when no explicit namespace/name is given.
+func repoRefFromURLPath(url string) (string, string) {
+	p := url
+	if i := strings.Index(p, "://"); i >= 0 {
+		p = p[i+3:]
+	}
+	if i := strings.IndexAny(p, "/"); i >= 0 {
+		p = p[i+1:]
+	}
+	p = strings.Trim(p, "/")
+	parts := strings.Split(p, "/")
+	if len(parts) >= 2 {
+		return parts[len(parts)-2], parts[len(parts)-1]
+	}
+	if len(parts) == 1 {
+		return "default", parts[0]
+	}
+	return "", ""
 }
 
 func cmdWorkspace(c *ctx) {

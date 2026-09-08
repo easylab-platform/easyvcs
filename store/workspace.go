@@ -14,15 +14,24 @@ import (
 const WorkspaceMarkerFile = ".easyvcs-workspace"
 
 // WorkspaceMarker is the pointer content stored at a working directory root. It
-// records which repository (namespace/name) this checkout belongs to and which
-// revision is currently checked out. IgnoreHash tracks the hash of the ignore
-// files at the last commit so a revision in .gitignore/.vcsignore can trigger
-// history rewriting.
+// records which repository (namespace/name) this checkout belongs to, which
+// revision is currently checked out, and the location of the central store
+// (home path and optional DSN) so a workspace is self-describing even when its
+// store lives outside the process's EASYVCS_HOME. IgnoreHash tracks the hash of
+// the ignore files at the last commit so a revision in .gitignore/.vcsignore can
+// trigger history rewriting.
 type WorkspaceMarker struct {
 	Repo            RepoRef `json:"repo"`
 	CurrentRevision string  `json:"current_revision"`
 	Branch          string  `json:"branch,omitempty"`
 	IgnoreHash      string  `json:"ignore_hash,omitempty"`
+	// Home is the central store root directory this workspace belongs to.
+	// Empty means "use the process's HomeDir()".
+	Home string `json:"home,omitempty"`
+	// DSN optionally overrides the metadata backend location (e.g. a sqlite
+	// file path or a postgres connection string). When set it takes precedence
+	// over Home<DBFile>. Empty means default (Home/easyvcs.db, sqlite).
+	DSN string `json:"dsn,omitempty"`
 }
 
 // LoadMarker reads and parses the workspace marker from a directory, walking
@@ -59,8 +68,31 @@ func LookupMarker(dir string) (*WorkspaceMarker, error) {
 	return m, err
 }
 
-// WriteMarker writes a workspace marker file at the given directory root.
+// OpenStoreForMarker opens the central store that a workspace marker belongs to.
+// When the marker records a Home or DSN it is used directly, so a workspace can
+// be reopened even if its store lives in a different location from the process
+// EASYVCS_HOME. An empty Home/DSN falls back to the process defaults.
+func OpenStoreForMarker(m *WorkspaceMarker) (*CentralStore, error) {
+	if m == nil {
+		return OpenDefault()
+	}
+	if m.DSN != "" {
+		return OpenDriver(DriverConfig{Kind: KindSQLite, DSN: m.DSN})
+	}
+	if m.Home != "" {
+		return Open(filepath.Join(m.Home, DefaultDBFile))
+	}
+	return OpenDefault()
+}
+
+// WriteMarker writes a workspace marker file at the given directory root. If the
+// marker does not already record a store location (Home/DSN), the process's
+// HomeDir() is recorded so the workspace is self-describing; a caller that
+// binds a workspace to a different store sets Home/DSN explicitly beforehand.
 func WriteMarker(dir string, m *WorkspaceMarker) error {
+	if m.DSN == "" && m.Home == "" {
+		m.Home = HomeDir()
+	}
 	b, err := json.Marshal(m)
 	if err != nil {
 		return err

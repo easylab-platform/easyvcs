@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/easylab-platform/easyvcs/object"
 	"github.com/easylab-platform/easyvcs/revision"
@@ -246,6 +247,87 @@ func resolveRemote(repo *store.Repo, nameOrURL string) (*store.Remote, error) {
 	return &store.Remote{Name: nameOrURL, URL: nameOrURL}, nil
 }
 
+// isLocalURL reports whether a remote URL denotes a local filesystem path
+// (absolute, ./ or ../, ~-expanded, or a bare path) rather than a network
+// endpoint. Network URLs carry an explicit "://" scheme or a host:port look.
+func isLocalURL(u string) bool {
+	trimmed := strings.TrimSpace(u)
+	if trimmed == "" {
+		return false
+	}
+	if strings.Contains(trimmed, "://") {
+		return false
+	}
+	if strings.HasPrefix(trimmed, "/") || strings.HasPrefix(trimmed, "./") ||
+		strings.HasPrefix(trimmed, "../") || strings.HasPrefix(trimmed, "~") {
+		return true
+	}
+	// A string without "://", without a ":" (so not host:port), and with no
+	// whitespace is treated as a bare path (e.g. a repo directory).
+	if !strings.Contains(trimmed, ":") && !strings.ContainsAny(trimmed, " \t") {
+		return true
+	}
+	return false
+}
+
+// expandLocalPath expands a leading "~" to the user home directory for a local
+// remote path. Relative paths are resolved against the current working dir.
+func expandLocalPath(u string) string {
+	p := strings.TrimSpace(u)
+	if strings.HasPrefix(p, "~") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(p, "~"))
+		}
+	}
+	if !filepath.IsAbs(p) {
+		if abs, err := filepath.Abs(p); err == nil {
+			return abs
+		}
+	}
+	return p
+}
+
+// openLocalRepo opens the repository identified by a local remote path. The path
+// must be a workspace directory (it carries a .easyvcs-workspace marker) whose
+// marker records the store location (Home/DSN) and the repo ref. This keeps
+// local remotes self-contained and independent of the current process home.
+func openLocalRepo(path string) (*store.Repo, error) {
+	marker, err := store.LookupMarker(expandLocalPath(path))
+	if err != nil {
+		return nil, fmt.Errorf("open local remote: %w", err)
+	}
+	cs, err := store.OpenStoreForMarker(marker)
+	if err != nil {
+		return nil, err
+	}
+	return cs.OpenRepo(marker.Repo)
+}
+
+// localRepoWithMarker is the local counterpart of a remote: it resolves the
+// target repo and exposes the same advertise/fetch info the HTTP server would.
+type localRepoWithMarker struct {
+	repo   *store.Repo
+	marker *store.WorkspaceMarker
+}
+
+// openLocalRepoWithMarker opens a local remote and keeps its marker so advance
+// bookkeeping (e.g. storing the remote sync tip) can be done.
+func openLocalRepoWithMarker(path string) (*localRepoWithMarker, error) {
+	marker, err := store.LookupMarker(expandLocalPath(path))
+	if err != nil {
+		return nil, fmt.Errorf("open local remote: %w", err)
+	}
+	cs, err := store.OpenStoreForMarker(marker)
+	if err != nil {
+		return nil, err
+	}
+	repo, err := cs.OpenRepo(marker.Repo)
+	if err != nil {
+		return nil, err
+	}
+	return &localRepoWithMarker{repo: repo, marker: marker}, nil
+}
+
 func trimTrailingSlash(s string) string {
 	for len(s) > 0 && s[len(s)-1] == '/' {
 		s = s[:len(s)-1]
@@ -296,18 +378,37 @@ func doFetch(repo *store.Repo, args []string) error {
 		return err
 	}
 	only := args[1:]
+
+	// Local remote: a marker-based workspace directory. Advertise by reading
+	// the target repo's refs/revisions directly; record the chosen refs.
+	if isLocalURL(rem.URL) {
+		target, err := openLocalRepo(rem.URL)
+		if err != nil {
+			return err
+		}
+		refs, err := target.ListRefs()
+		if err != nil {
+			return err
+		}
+		return recordFetchedRefs(repo, rem.Name, refs, rem.URL, only)
+	}
+
 	full := baseForRepo(rem.URL, repo.RepoRef())
 
 	var adv advertiseResp
 	if err := postJSON(full+"/advertise", advertiseReq{Have: currentRevisionIDs(repo)}, &adv, ""); err != nil {
 		return err
 	}
+	return recordFetchedRefs(repo, rem.Name, adv.Refs, rem.URL, only)
+}
 
-	// Determine which refs to record. With no explicit refs, record all branchs.
-	list := adv.Refs
+// recordFetchedRefs records the chosen branch refs into the local remote_refs
+// namespace and sets the remote default branch from the first branch if none is
+// recorded yet. list may be []*store.Ref (remote) or a reference source.
+func recordFetchedRefs(repo *store.Repo, remoteName string, list []*store.Ref, displayURL string, only []string) error {
 	if len(only) > 0 {
 		var sel []*store.Ref
-		for _, r := range adv.Refs {
+		for _, r := range list {
 			for _, o := range only {
 				if r.Name == o {
 					sel = append(sel, r)
@@ -316,26 +417,22 @@ func doFetch(repo *store.Repo, args []string) error {
 		}
 		list = sel
 	}
-
-	// Record each into remote_refs and remember the default branch.
 	count := 0
 	for _, r := range list {
 		if r.Kind != store.RefBranch {
 			continue
 		}
-		if err := repo.SetRemoteRef(rem.Name, &store.RemoteRef{RemoteName: rem.Name, Kind: store.RefBranch, Name: r.Name, Target: r.Target}); err != nil {
+		if err := repo.SetRemoteRef(remoteName, &store.RemoteRef{RemoteName: remoteName, Kind: store.RefBranch, Name: r.Name, Target: r.Target}); err != nil {
 			return err
 		}
 		count++
 	}
-	// Record the remote's default branch if adv exposes it (advertise does not
-	// carry it yet; fall back to the first branch).
-	if def, _ := repo.GetRemoteDefaultBranch(rem.Name); def == "" && len(list) > 0 {
-		if err := repo.SetRemoteDefaultBranch(rem.Name, list[0].Name); err != nil {
+	if def, _ := repo.GetRemoteDefaultBranch(remoteName); def == "" && len(list) > 0 {
+		if err := repo.SetRemoteDefaultBranch(remoteName, list[0].Name); err != nil {
 			return err
 		}
 	}
-	fmt.Printf("fetched %d ref(s) from %s\n", count, rem.URL)
+	fmt.Printf("fetched %d ref(s) from %s\n", count, displayURL)
 	return nil
 }
 
@@ -369,6 +466,15 @@ func cmdPull(c *ctx) {
 		fmt.Fprintln(os.Stderr, "pull: no branch specified and no default; pass a branch name")
 		os.Exit(1)
 	}
+
+	if isLocalURL(rem.URL) {
+		if err := doLocalPull(c, repo, rem, want, rem.URL); err != nil {
+			fmt.Fprintln(os.Stderr, "pull:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	full := baseForRepo(rem.URL, repo.RepoRef())
 
 	var adv advertiseResp
@@ -424,6 +530,11 @@ func doPull(repo *store.Repo, args []string) error {
 	if want == "" {
 		return fmt.Errorf("no branch specified and no default; pass a branch name")
 	}
+
+	if isLocalURL(rem.URL) {
+		return doLocalPull(&ctx{}, repo, rem, want, rem.URL)
+	}
+
 	full := baseForRepo(rem.URL, repo.RepoRef())
 
 	var adv advertiseResp
@@ -463,7 +574,6 @@ func collaborativePull(c *ctx, repo *store.Repo, rem *store.Remote, full string,
 		localRef = &store.Ref{Name: branch, Kind: store.RefBranch}
 	}
 
-	// Fetch objects (they may not be present yet).
 	if err := postJSON(full+"/fetch", fetchReq, nil, ""); err != nil {
 		return err
 	}
@@ -539,6 +649,73 @@ func fetchRaw(full string, req advertiseReq, token string) ([]byte, error) {
 	return doPost(full+"/fetch", payload, token)
 }
 
+// doLocalPull performs a collaborative pull against a local (marker-based)
+// workspace directory used as a remote. It mirrors the HTTP branch: read the
+// target refs, apply the remote tip, then rebase the remote tip onto the local
+// branch tip so the two edits merge into one linear line (conflicts become
+// first-class objects). No network transport is used.
+func doLocalPull(c *ctx, repo *store.Repo, rem *store.Remote, branch, url string) error {
+	ws := revision.NewWorkspace(repo)
+	localRef, err := ws.GetRef(branch)
+	if err != nil || localRef == nil {
+		localRef = &store.Ref{Name: branch, Kind: store.RefBranch}
+	}
+
+	target, err := openLocalRepoWithMarker(url)
+	if err != nil {
+		return err
+	}
+	remoteRef, err := target.repo.GetRef(branch)
+	if err != nil || remoteRef == nil || remoteRef.Kind != store.RefBranch {
+		return fmt.Errorf("branch not found on local remote: %s", branch)
+	}
+	remoteTip := remoteRef.Target
+
+	// Bring the remote tip (and its objects) into the local repo.
+	b, err := transfer.Collect(target.repo, nil, nil)
+	if err != nil {
+		return err
+	}
+	if _, err := transfer.Apply(repo, b); err != nil {
+		return err
+	}
+
+	// No local tip yet: place the remote revision directly as the local tip.
+	localTip := localRef.Target
+	if localTip == "" {
+		if _, err := ws.SetRef(branch, store.RefBranch, remoteTip); err != nil {
+			return err
+		}
+		if err := repo.UpdateRemoteSyncTip(rem.Name, remoteTip); err != nil {
+			return err
+		}
+		fmt.Printf("pulled %s -> %s (no local tip; placed remote tip)\n", url, short(remoteTip))
+		return nil
+	}
+
+	// The local tip's snapshot hash; the remote tip is rebased ONTO it so the
+	// remote edit merges into the local line (conflicts -> first-class objects).
+	localRev, err := repo.GetRevision(localTip)
+	if err != nil {
+		return err
+	}
+	if _, _, err := ws.Rebase(remoteTip, []object.ID{localRev.Hash}); err != nil {
+		return err
+	}
+	mergedRev, err := repo.GetRevision(remoteTip)
+	if err != nil {
+		return err
+	}
+	if _, err := ws.SetRef(branch, store.RefBranch, mergedRev.ID); err != nil {
+		return err
+	}
+	if err := repo.UpdateRemoteSyncTip(rem.Name, mergedRev.ID); err != nil {
+		return err
+	}
+	fmt.Printf("pulled %s -> %s merged onto %s (revision %s)\n", url, short(remoteTip), short(localTip), short(mergedRev.ID))
+	return nil
+}
+
 func cmdPush(c *ctx) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
@@ -561,6 +738,20 @@ func cmdPush(c *ctx) {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "push:", err)
 		os.Exit(1)
+	}
+	if isLocalURL(rem.URL) {
+		target, err := openLocalRepo(rem.URL)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "push:", err)
+			os.Exit(1)
+		}
+		n, err := transfer.Apply(target, b)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "push:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("pushed to %s: applied %d revision(s)\n", rem.URL, n)
+		return
 	}
 	data, err := postBundle(full+"/push", b, rem.Token)
 	if err != nil {

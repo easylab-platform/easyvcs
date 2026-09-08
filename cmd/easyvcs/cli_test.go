@@ -4,6 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/easylab-platform/easyvcs/object"
+	"github.com/easylab-platform/easyvcs/revision"
+	"github.com/easylab-platform/easyvcs/store"
 )
 
 func TestCLIFullWorkflow(t *testing.T) {
@@ -143,4 +147,54 @@ func TestCLIRemote(t *testing.T) {
 	captureStdout(t, func() { cmdRemote(c) })
 	os.Args = []string{"easyvcs", "remote", "remove", "origin"}
 	captureStdout(t, func() { cmdRemote(c) })
+}
+
+// TestCLICloneLocal verifies `clone` from a local workspace directory into a
+// fresh destination repo + workspace, registering origin and pulling the source
+// default branch. It uses two independent EASYVCS_HOME stores.
+func TestCLICloneLocal(t *testing.T) {
+	// Source repo in homeA.
+	srcHome := t.TempDir()
+	t.Setenv("EASYVCS_HOME", srcHome)
+	csA, _ := store.OpenDefault()
+	srcRepo, err := csA.Create(store.RepoRef{Namespace: "team", Name: "app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsA := revision.NewWorkspace(srcRepo)
+	snap, rev, err := wsA.CommitFromChanges(object.ID{}, []revision.FileChangeSpec{{Path: "a.txt", Content: []byte("hi\n")}}, "c1", store.Author{Name: "t"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = snap
+	if _, err := wsA.SetRef("main", store.RefBranch, rev.ID); err != nil {
+		t.Fatal(err)
+	}
+	srcDir := t.TempDir()
+	if err := store.WriteMarker(srcDir, &store.WorkspaceMarker{Repo: srcRepo.RepoRef(), Home: srcHome}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Clone into homeB.
+	dstHome := t.TempDir()
+	t.Setenv("EASYVCS_HOME", dstHome)
+	c := &ctx{cs: mustOpen(t)}
+	dstDir := t.TempDir()
+	orig, _ := os.Getwd()
+	_ = os.Chdir(dstDir)
+	defer func() { _ = os.Chdir(orig) }()
+	os.Args = []string{"easyvcs", "clone", srcDir}
+	captureStdout(t, func() { cmdClone(c) })
+
+	wsB := revision.NewWorkspace(openFirstRepo(t, c.cs))
+	mainRef, err := wsB.GetRef("main")
+	if err != nil || mainRef == nil {
+		t.Fatalf("main branch missing after clone: %v", err)
+	}
+	if mainRef.Target != rev.ID {
+		t.Fatalf("clone main points at %s want %s", mainRef.Target, rev.ID)
+	}
+	if _, err := wsB.GetRevision(rev.ID); err != nil {
+		t.Fatalf("cloned revision missing: %v", err)
+	}
 }
