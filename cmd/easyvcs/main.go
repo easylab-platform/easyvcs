@@ -378,19 +378,25 @@ func repoRefFromURLPath(url string) (string, string) {
 	p := url
 	if i := strings.Index(p, "://"); i >= 0 {
 		p = p[i+3:]
-	}
-	if i := strings.IndexAny(p, "/"); i >= 0 {
-		p = p[i+1:]
+		// Drop the host (up to the first '/'), leaving the path segments.
+		if j := strings.Index(p, "/"); j >= 0 {
+			p = p[j+1:]
+		} else {
+			p = ""
+		}
 	}
 	p = strings.Trim(p, "/")
 	parts := strings.Split(p, "/")
+	for len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
 	if len(parts) >= 2 {
 		return parts[len(parts)-2], parts[len(parts)-1]
 	}
 	if len(parts) == 1 {
 		return "default", parts[0]
 	}
-	return "", ""
+	return "default", ""
 }
 
 func cmdWorkspace(c *ctx) {
@@ -441,7 +447,12 @@ func cmdWorkspaceAttach(c *ctx) {
 		fmt.Printf("workspace attached to %s\n", repo)
 		return
 	}
-	repo, err := c.cs.OpenRepo(marker.Repo)
+	cs, err := store.OpenStoreForMarker(marker)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "workspace attach:", err)
+		os.Exit(1)
+	}
+	repo, err := cs.OpenRepo(marker.Repo)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "workspace attach: repository not found:", marker.Repo, "(import it first)")
 		os.Exit(1)

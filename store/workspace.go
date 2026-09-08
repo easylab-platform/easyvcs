@@ -69,12 +69,12 @@ func LookupMarker(dir string) (*WorkspaceMarker, error) {
 }
 
 // OpenStoreForMarker opens the central store that a workspace marker belongs to.
-// When the marker records a Home or DSN it is used directly, so a workspace can
-// be reopened even if its store lives in a different location from the process
-// EASYVCS_HOME. An empty Home/DSN falls back to the process defaults.
+// The marker must record a store location (Home for a sqlite store, or DSN as an
+// override). Unlike the legacy fallback, there is no silent reliance on the
+// process EASYVCS_HOME: an empty Home and DSN is treated as an invalid marker.
 func OpenStoreForMarker(m *WorkspaceMarker) (*CentralStore, error) {
 	if m == nil {
-		return OpenDefault()
+		return nil, fmt.Errorf("workspace marker: nil")
 	}
 	if m.DSN != "" {
 		return OpenDriver(DriverConfig{Kind: KindSQLite, DSN: m.DSN})
@@ -82,7 +82,7 @@ func OpenStoreForMarker(m *WorkspaceMarker) (*CentralStore, error) {
 	if m.Home != "" {
 		return Open(filepath.Join(m.Home, DefaultDBFile))
 	}
-	return OpenDefault()
+	return nil, fmt.Errorf("workspace marker: missing store location (home or dsn)")
 }
 
 // WriteMarker writes a workspace marker file at the given directory root. If the
@@ -178,14 +178,19 @@ func (s *CentralStore) repoByID(id int64) (RepoRef, error) {
 }
 
 // FindRepo walks up from dir to locate the repo a workspace belongs to. It
-// returns the workspace marker and the repo-scoped handle. If the marker's
-// repo is missing from the store, an error is returned.
+// returns the workspace marker and the repo-scoped handle, opening the store
+// recorded by the marker (Home/DSN) rather than assuming this store instance.
+// If the marker's repo is missing from its store, an error is returned.
 func (s *CentralStore) ResolveWorkspace(dir string) (*WorkspaceMarker, *Repo, error) {
 	marker, err := LookupMarker(dir)
 	if err != nil {
 		return nil, nil, err
 	}
-	repo, err := s.OpenRepo(marker.Repo)
+	cs, err := OpenStoreForMarker(marker)
+	if err != nil {
+		return nil, nil, err
+	}
+	repo, err := cs.OpenRepo(marker.Repo)
 	if err != nil {
 		return nil, nil, err
 	}

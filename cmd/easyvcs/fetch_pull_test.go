@@ -148,5 +148,13 @@ func newRemoteMux(t *testing.T, refs []*store.Ref, ids []string, b *transfer.Bun
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = w.Write(enc)
 	})
-	return httptest.NewServer(mux)
+	// easylab gateway speaks HTTP/2 (h2c) — make the fake remote dual-stack.
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	srv := httptest.NewUnstartedServer(mux)
+	srv.Config.Protocols = protocols
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv
 }

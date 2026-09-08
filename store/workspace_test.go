@@ -58,6 +58,63 @@ func TestWorkspaceResolve(t *testing.T) {
 	}
 }
 
+func TestWriteMarkerRecordsHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("EASYVCS_HOME", home)
+	dir := t.TempDir()
+	m := &WorkspaceMarker{Repo: RepoRef{Namespace: "n", Name: "r"}}
+	if err := WriteMarker(dir, m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Home != home {
+		t.Fatalf("WriteMarker should record HomeDir, got %q", m.Home)
+	}
+	got, err := LookupMarker(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Home != home {
+		t.Fatalf("marker after write should carry home, got %q", got.Home)
+	}
+}
+
+func TestOpenStoreForMarkerRequiresLocation(t *testing.T) {
+	// A marker with no Home/DSN must be rejected (no silent fallback).
+	if _, err := OpenStoreForMarker(&WorkspaceMarker{Repo: RepoRef{Namespace: "n", Name: "r"}}); err == nil {
+		t.Fatal("expected error for marker without store location")
+	}
+	if _, err := OpenStoreForMarker(nil); err == nil {
+		t.Fatal("expected error for nil marker")
+	}
+	// With a valid Home it opens the store at <home>/easyvcs.db.
+	home := t.TempDir()
+	t.Setenv("EASYVCS_HOME", home)
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := OpenStoreForMarker(&WorkspaceMarker{Repo: RepoRef{Namespace: "n", Name: "r"}, Home: home})
+	if err != nil {
+		t.Fatalf("expected open with home: %v", err)
+	}
+	_ = cs.Close()
+}
+
+func TestOpenStoreForMarkerPrecedence(t *testing.T) {
+	home := t.TempDir()
+	other := t.TempDir()
+	t.Setenv("EASYVCS_HOME", other)
+	// DSN wins over Home.
+	dsn := filepath.Join(home, "custom.db")
+	cs, err := OpenStoreForMarker(&WorkspaceMarker{Repo: RepoRef{Namespace: "n", Name: "r"}, Home: home, DSN: dsn})
+	if err != nil {
+		t.Fatalf("open with dsn: %v", err)
+	}
+	if cs.root != filepath.Dir(dsn) {
+		t.Fatalf("dsn should route to %s, got %s", filepath.Dir(dsn), cs.root)
+	}
+	_ = cs.Close()
+}
+
 func TestRepoCloseAndObjectIDs(t *testing.T) {
 	cs := newTestCentral(t)
 	repo, _ := cs.Create(RepoRef{Namespace: "n", Name: "r"})

@@ -52,7 +52,15 @@ func stubRemoteServer(t *testing.T, remoteRepo *store.Repo) *httptest.Server {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = w.Write(enc)
 	})
-	return httptest.NewServer(mux)
+	// easylab gateway speaks HTTP/2 (h2c) — make the fake remote dual-stack.
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	srv := httptest.NewUnstartedServer(mux)
+	srv.Config.Protocols = protocols
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 func TestCollaborativePullMergesRemoteFirstTime(t *testing.T) {

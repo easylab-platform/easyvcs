@@ -111,6 +111,18 @@ func cmdRemote(c *ctx) {
 
 // --- smart protocol: pull / push ---
 
+// remoteClient returns a client that speaks cleartext HTTP/2 (h2c prior
+// knowledge) to the easylab gateway, which serves the Bundle protocol over
+// HTTP/2 only. https:// targets negotiate h2 via ALPN; http:// targets use
+// h2c. HTTP/1.1 is disabled so the gateway's h1-enforcement never has to
+// reject us.
+func remoteClient() *http.Client {
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(false)
+	protocols.SetUnencryptedHTTP2(true)
+	return &http.Client{Transport: &http.Transport{Protocols: protocols}}
+}
+
 // doPost performs an HTTP POST with an optional gzip-compressed body and token,
 // returning the raw response body bytes.
 func doPost(url string, body []byte, token string) ([]byte, error) {
@@ -133,7 +145,7 @@ func doPost(url string, body []byte, token string) ([]byte, error) {
 			}
 		}
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := remoteClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +183,7 @@ func postJSON(url string, body any, out any, token string) error {
 			}
 		}
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := remoteClient().Do(req)
 	if err != nil {
 		return err
 	}
@@ -216,7 +228,7 @@ func doPostCompressed(url string, body []byte, token string) ([]byte, error) {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := remoteClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -259,21 +271,28 @@ func isLocalURL(u string) bool {
 		return false
 	}
 	if strings.HasPrefix(trimmed, "/") || strings.HasPrefix(trimmed, "./") ||
-		strings.HasPrefix(trimmed, "../") || strings.HasPrefix(trimmed, "~") {
+		strings.HasPrefix(trimmed, "../") || strings.HasPrefix(trimmed, "~") ||
+		strings.HasPrefix(trimmed, ".") {
 		return true
 	}
-	// A string without "://", without a ":" (so not host:port), and with no
-	// whitespace is treated as a bare path (e.g. a repo directory).
-	if !strings.Contains(trimmed, ":") && !strings.ContainsAny(trimmed, " \t") {
-		return true
+	// A ":" denotes host:port (a network target), even when it carries a path.
+	if strings.Contains(trimmed, ":") {
+		return false
 	}
-	return false
+	// A bare word with a '/' is a relative path; a bare word without one is a
+	// host name and is treated as remote.
+	return strings.Contains(trimmed, "/")
 }
 
 // expandLocalPath expands a leading "~" to the user home directory for a local
-// remote path. Relative paths are resolved against the current working dir.
+// remote path and resolves relative paths against the current working dir. It is
+// only meaningful for local URLs (callers branch on isLocalURL first); a URL is
+// returned unchanged.
 func expandLocalPath(u string) string {
 	p := strings.TrimSpace(u)
+	if strings.Contains(p, "://") {
+		return p
+	}
 	if strings.HasPrefix(p, "~") {
 		if home, err := os.UserHomeDir(); err == nil {
 			return filepath.Join(home, strings.TrimPrefix(p, "~"))
