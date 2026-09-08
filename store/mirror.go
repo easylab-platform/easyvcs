@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -20,16 +21,21 @@ type PushMirror struct {
 	LastError string
 }
 
-// PutPushMirror inserts or replaces a push-mirror for this repo.
+// PutPushMirror inserts or replaces a push-mirror for this repo. The token is
+// encrypted at rest (EASYVCS_SECRET_KEY; plaintext when unset).
 func (r *Repo) PutPushMirror(m *PushMirror) error {
-	row := &pushMirrorRow{RepoID: r.repoID, Name: m.Name, URL: m.URL, Branch: m.Branch, Token: m.Token, LastRev: m.LastRev, LastError: m.LastError}
+	enc, err := encryptSecret(m.Token)
+	if err != nil {
+		return err
+	}
+	row := &pushMirrorRow{RepoID: r.repoID, Name: m.Name, URL: m.URL, Branch: m.Branch, Token: enc, LastRev: m.LastRev, LastError: m.LastError}
 	return r.cs.d.gdb.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "repo_id"}, {Name: "name"}},
 		UpdateAll: true,
 	}).Create(row).Error
 }
 
-// GetPushMirror returns one push-mirror by name.
+// GetPushMirror returns one push-mirror by name (token decrypted).
 func (r *Repo) GetPushMirror(name string) (*PushMirror, error) {
 	var row pushMirrorRow
 	err := r.cs.d.gdb.Where("repo_id=? AND name=?", r.repoID, name).First(&row).Error
@@ -39,8 +45,12 @@ func (r *Repo) GetPushMirror(name string) (*PushMirror, error) {
 	if err != nil {
 		return nil, err
 	}
+	dec, err := decryptSecret(row.Token)
+	if err != nil {
+		return nil, err
+	}
 	return &PushMirror{ID: row.ID, RepoID: row.RepoID, Name: row.Name, URL: row.URL,
-		Branch: row.Branch, Token: row.Token, LastRev: row.LastRev, LastError: row.LastError}, nil
+		Branch: row.Branch, Token: dec, LastRev: row.LastRev, LastError: row.LastError}, nil
 }
 
 // ListPushMirrors lists all push-mirrors for this repo (tokens omitted).
@@ -101,6 +111,7 @@ func (s *CentralStore) CreateMirror(r RepoRef, meta RepoMeta) (*Repo, error) {
 }
 
 // AllPushMirrors lists every push-mirror across all repositories (scheduler).
+// Tokens are decrypted for the scheduler's authenticated pushes.
 func (s *CentralStore) AllPushMirrors() ([]*PushMirror, error) {
 	type joined struct {
 		pushMirrorRow
@@ -116,15 +127,21 @@ func (s *CentralStore) AllPushMirrors() ([]*PushMirror, error) {
 	}
 	out := make([]*PushMirror, 0, len(rows))
 	for i := range rows {
+		dec, err := decryptSecret(rows[i].Token)
+		if err != nil {
+			return nil, fmt.Errorf("push mirror %s: %w", rows[i].Name, err)
+		}
 		m := &PushMirror{ID: rows[i].ID, RepoID: rows[i].RepoID, Name: rows[i].Name, URL: rows[i].URL,
-			Branch: rows[i].Branch, Token: rows[i].Token, LastRev: rows[i].LastRev, LastError: rows[i].LastError}
+			Branch: rows[i].Branch, Token: dec, LastRev: rows[i].LastRev, LastError: rows[i].LastError}
 		m.Name = rows[i].Namespace + "/" + rows[i].RepoName + "|" + m.Name
 		out = append(out, m)
 	}
 	return out, nil
 }
 
-// AllMirrors lists every read-only mirror repository (scheduler).
+// AllMirrors lists every read-only mirror repository (scheduler). The mirror
+// token is decrypted (RepoMeta.UpdateMirrorMeta encrypts on write; this raw
+// row read must mirror that).
 func (s *CentralStore) AllMirrors() ([]*Repo, RepoMetaMap, error) {
 	var rows []repoRow
 	if err := s.d.gdb.Where("kind=?", "mirror").Order("namespace, name").Find(&rows).Error; err != nil {
@@ -134,10 +151,14 @@ func (s *CentralStore) AllMirrors() ([]*Repo, RepoMetaMap, error) {
 	meta := RepoMetaMap{}
 	for i := range rows {
 		repos = append(repos, &Repo{cs: s, repoID: rows[i].ID, Namespace: rows[i].Namespace, Name: rows[i].Name})
+		dec, err := decryptSecret(rows[i].MirrorToken)
+		if err != nil {
+			return nil, nil, fmt.Errorf("mirror %s/%s: %w", rows[i].Namespace, rows[i].Name, err)
+		}
 		meta[nameOf(rows[i].Namespace, rows[i].Name)] = RepoMeta{
 			Kind: rows[i].Kind, MirrorURL: rows[i].MirrorURL, MirrorBranch: rows[i].MirrorBranch,
 			MirrorInterval: int(rows[i].MirrorInterval), MirrorLastRev: rows[i].MirrorLastRev,
-			MirrorLastSync: rows[i].MirrorLastSync, MirrorLastErr: rows[i].MirrorLastErr, MirrorToken: rows[i].MirrorToken,
+			MirrorLastSync: rows[i].MirrorLastSync, MirrorLastErr: rows[i].MirrorLastErr, MirrorToken: dec,
 		}
 	}
 	return repos, meta, nil

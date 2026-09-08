@@ -15,6 +15,7 @@ import (
 
 	"github.com/easylab-platform/easyvcs/object"
 	"github.com/easylab-platform/easyvcs/store"
+	"gorm.io/gorm"
 )
 
 // Version is the bundle format version.
@@ -298,40 +299,58 @@ func collectObjects(repo *store.Repo, root object.ID, b *Bundle, hasObject func(
 	return walk(root)
 }
 
-// Apply writes the contents of a bundle into a repository. Objects are written
-// first (content-addressed, idempotent), then snapshots, changes, and refs.
-// Objects are inserted in a single transaction for efficiency. It returns the
-// number of changes written.
+// Apply writes the contents of a bundle into a repository atomically:
+// objects, snapshots, revisions, and refs all land in a single transaction or
+// none do. It returns the number of changes written.
 func Apply(repo *store.Repo, b *Bundle) (int, error) {
-	// Decode all objects first so we can batch them; content-addressed writes
-	// are idempotent (INSERT ... ON CONFLICT DO NOTHING).
-	objs := make([]*object.Object, 0, len(b.Objects))
-	for _, ob := range b.Objects {
-		obj, err := decodeObjectRecord(ob)
-		if err != nil {
-			return 0, err
+	return ApplyTx(repo, b)
+}
+
+// ApplyTx writes the contents of a bundle into a repository within a single
+// transaction: objects, snapshots, revisions, and refs either all land or none
+// do. On error the transaction is rolled back. It returns the number of
+// changes written.
+func ApplyTx(repo *store.Repo, b *Bundle) (int, error) {
+	err := repo.Transaction(func(tx *gorm.DB) error {
+		// Decode all objects first so we can batch them; content-addressed
+		// writes are idempotent (INSERT ... ON CONFLICT DO NOTHING).
+		objs := make([]*object.Object, 0, len(b.Objects))
+		for _, ob := range b.Objects {
+			obj, err := decodeObjectRecord(ob)
+			if err != nil {
+				return err
+			}
+			objs = append(objs, obj)
 		}
-		objs = append(objs, obj)
-	}
-	if err := repo.WriteObjectsBatch(objs); err != nil {
+		if err := repo.WriteObjectsBatchTx(tx, objs); err != nil {
+			return err
+		}
+		for _, snap := range b.Snapshots {
+			if err := repo.PutSnapshotTx(tx, snap); err != nil {
+				return err
+			}
+		}
+		for _, ch := range b.Revisions {
+			if err := repo.PutRevisionTx(tx, ch); err != nil {
+				return err
+			}
+		}
+		for _, r := range b.Refs {
+			if err := repo.PutRefTx(tx, r); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		return 0, err
 	}
-	for _, snap := range b.Snapshots {
-		if err := repo.PutSnapshot(snap); err != nil {
-			return 0, err
-		}
-	}
-	for _, ch := range b.Revisions {
-		if err := repo.PutRevision(ch); err != nil {
-			return 0, err
-		}
-	}
-	for _, r := range b.Refs {
-		if err := repo.PutRef(r); err != nil {
-			return 0, err
-		}
-	}
 	return len(b.Revisions), nil
+}
+
+// PutRefTx upserts a ref within an open transaction, scoped to repo.
+func PutRefTx(tx *gorm.DB, r *store.Ref, repo *store.Repo) error {
+	return repo.PutRefTx(tx, r)
 }
 
 func decodeObjectRecord(ob ObjectRecord) (*object.Object, error) {

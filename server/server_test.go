@@ -290,8 +290,13 @@ func TestACLDeniesNonMemberWrite(t *testing.T) {
 
 	// A user with a token but NOT a team member -> repo-level write denied (403).
 	// Create a second user + token in a different namespace.
-	u2, _ := s.cs.CreateUser("outsider", "x")
-	_, _ = s.cs.CreateToken("secret-out", u2.ID, "write")
+	u2, err := s.cs.CreateUser("outsider", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.cs.CreateToken("secret-out", u2.ID, "write"); err != nil {
+		t.Fatal(err)
+	}
 	req2 := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(payload))
 	req2.Header.Set("Content-Encoding", "gzip")
 	req2.Header.Set("Authorization", "Bearer secret-out")

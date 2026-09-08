@@ -58,6 +58,14 @@ func OpenDriver(cfg DriverConfig) (*CentralStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	if kind == KindSQLite {
+		// modernc/glebarez sqlite: multiple pooled connections see their own
+		// PRAGMA state, so WAL + busy_timeout must be baked into the DSN (they
+		// are connection-scoped) rather than Exec'd once on one connection.
+		// A single connection avoids cross-conn lock churn entirely; writes are
+		// serialized by the server layer anyway.
+		sqlDB.SetMaxOpenConns(1)
+	}
 
 	d := &sqlDialect{db: sqlDB, gdb: db, kind: kind}
 	cs := &CentralStore{d: d, root: rootFor(kind, dsn)}

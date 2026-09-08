@@ -906,6 +906,8 @@ func (w *Workspace) resolvePath(t *object.Tree, path string, chosen object.ID, r
 		}
 		// Intermediate dir: recurse into existing child subtree, or create a new
 		// empty subtree if the path doesn't exist yet (for adding nested files).
+		// The subtree read is served by the shared pool (no open transaction at
+		// this point), so it is safe under a single-connection sqlite pool.
 		var childTree *object.Tree
 		if ok && child.Kind == object.KindTree {
 			childTree = w.mustTree(child.ID)

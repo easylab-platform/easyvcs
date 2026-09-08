@@ -472,4 +472,3 @@ func writeStream(w http.ResponseWriter, resp *http.Response) error {
 	}
 }
 
-var _ = store.RepoRef{}

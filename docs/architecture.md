@@ -1,20 +1,22 @@
 # EasyVCS 架构设计文档
 
-一个 **Change-Native** 版本控制系统。基于 jj(Jujutsu) 的理念，但去掉 Git 兼容层、操作日志、工作副本跟踪，聚焦于**基于 API 的修改系统 + 文件/数据库存储**。
+一个 **Change-Native** 版本控制系统。基于 jj(Jujutsu) 的理念，但去掉 Git 兼容层、操作日志、工作副本跟踪，聚焦于**基于 API 的修改系统 + 数据库存储**。
+
+> 术语注：早期文档使用 change/bookmark；代码现统一为 **revision/branch**。本文已同步。
 
 ## 1. 核心命题
 
-**Change 是唯一的第一等实体。** 一次"逻辑修改"有永久稳定的 ID；内容（Snapshot）是可变的、内容寻址的。任何 rebase/squash/amend 都改变内容但**永不改变** change_id。
+**Revision 是唯一的第一等实体。** 一次"逻辑修改"有永久稳定的 ID（`revision_id`）；内容（Snapshot）是可变的、内容寻址的。任何 rebase/squash/amend 都改变内容但**永不改变 revision_id**。
 
 ## 2. 命名与概念
 
 | 概念 | 命名 | 说明 | 稳定性 |
 |---|---|---|---|
-| 一次修改 | `Change` / `change_id` | 用户引用的主概念 | **永不变** |
+| 一次修改 | `Revision` / `revision_id` | 用户引用的主概念 | **永不变** |
 | 内容版本 | `Snapshot` / `sha` | 内容寻址的快照，图节点 | 会变（rebase 后新 sha） |
-| 存储容器 | `repository` | 一个 `.easyvcs` 目录 / 一个 DB | — |
-| 可变引用 | `bookmark` | 指向 change | repoint |
-| 不可变引用 | `tag` | 指向 change | 锚点 |
+| 存储容器 | `repository` | 中央 DB 里的一条 `(namespace, name)` 记录 | — |
+| 可变引用 | `branch` | 指向 revision | repoint |
+| 不可变引用 | `tag` | 指向 revision | 锚点 |
 | 工作副本 | 无 | API 手动提交 | — |
 | 操作日志 | 无 | 不支持 undo/reflog | — |
 
@@ -22,15 +24,15 @@
 
 ```
 Snapshot (= 图节点 = commit)
-├─ sha          ← 内容哈希（parents+tree+desc 派生）rebase 会变
-├─ change_id    ← 随机稳定标签，挂在此快照上
+├─ sha          ← 内容哈希（revision_id + parents + tree + desc 派生）rebase 会变
+├─ revision_id  ← 随机稳定标签，挂在此快照上
 ├─ parents[]    ← DAG 边（指向父 snapshot sha）
 ├─ tree_id      ← 根树（内容）
 ├─ description / author / time
 
-Change (= 逻辑修改 = 稳定对象)
+Revision (= 逻辑修改 = 稳定对象)
 ├─ id           ← 随机生成，永不修改
-├─ current      ← 指向当前 snapshot sha
+├─ hash         ← 指向当前 snapshot sha
 └─ created
 
 Object (内容寻址，不可变)
@@ -40,10 +42,10 @@ Object (内容寻址，不可变)
 ```
 
 ### 关键规则
-1. **change↔snapshot 1:1**：一个 change 指向唯一的 current snapshot。
-2. **rebase = 换 snapshot sha，change_id 不变**：只改 parents，生成新 sha，repoint current。
-3. **squash/合并 = 生成新 sha**：内容经 3-way 合并，吸收进目标 change（保留目标 change_id）。
-4. **`sha` 不含 change_id**：sha 仅由 parents+tree+description 派生（jj 同款做法），change_id 独立无关。
+1. **revision↔snapshot 1:1**：一个 revision 指向唯一的当前 snapshot。
+2. **rebase = 换 snapshot sha，revision_id 不变**：只改 parents，生成新 sha，repoint hash。
+3. **squash/合并 = 生成新 sha**：内容经 3-way 合并，吸收进目标 revision（保留目标 revision_id）。
+4. **`sha` 含 revision_id**（与 jj 不同，jj 的 commit id 不含 change id）：`sha = H(revision_id + tree_id + parents + description + author)`。fork 时为保持 fork 间 revision 身份唯一、可追溯，重映射 revision_id 并重算 sha。
 
 ## 4. 存储抽象（关键架构）
 
@@ -92,15 +94,15 @@ git_revision_links  -- 与 git commit 的弱追溯映射
 
 ## 6. 语义操作
 
-### Commit（产生新 snapshot [，可选新 change]）
+### Commit（产生新 snapshot [，可选新 revision]）
 1. 从工作区构建 tree（递归写 blob/tree 对象）。
-2. 计算 `sha = blake3(change_id + tree_id + parents + desc + author)`。
-3. 写 snapshot；若 change_id 为空则随机生成，否则 repoint 现有 change 的 current。
+2. 计算 `sha = H(revision_id + tree_id + parents + desc + author)`。
+3. 写 snapshot；若 revision_id 为空则随机生成，否则 repoint 现有 revision 的 hash。
 
-### Rebase（change_id 稳定，sha 变）
-1. 读 change 的 current snapshot。
+### Rebase（revision_id 稳定，sha 变）
+1. 读 revision 的当前 snapshot。
 2. **保留 tree_id、desc、author**，仅替换 parents → 新 sha。
-3. 写新 snapshot，repoint change.current。**change_id 永不改。**
+3. 写新 snapshot，repoint revision.hash。**revision_id 永不改。**
 
 ### Merge（3-way tree merge + 一等冲突）
 - 对 base/ours/theirs 三棵树的每个路径递归合并。
@@ -111,29 +113,28 @@ git_revision_links  -- 与 git commit 的弱追溯映射
 
 ```
 easyvcs init [DIR]                    创建仓库
-easyvcs commit [DIR]                  从工作区快照（新 change）
-easyvcs amend <change> [DIR]          更新现有 change
-easyvcs log [DIR]                     列 change + 当前 snapshot
+easyvcs commit [DIR]                  从工作区快照（新 revision）
+easyvcs amend <revision> [DIR]        更新现有 revision
+easyvcs log [DIR]                     列 revision + 当前 snapshot
 easyvcs show <sha> [DIR]              看 snapshot 元数据
-easyvcs rebase <change> --onto <sha>  change 改父（id 不变）
+easyvcs rebase <revision> --onto <sha> revision 改父（id 不变）
 easyvcs merge --base/--ours/--theirs  3-way 合并
-easyvcs rev <expr>                    解析修订（@ / <change_id>）
+easyvcs rev <expr>                    解析修订（@ / <revision_id>）
 ```
 
-## 8. API Server（easylab）
+## 8. 协议 Server（easyvcs-server / server 库）
 
-HTTP/JSON：
-- `POST /commit`   `{change_id?, parents?, tree_id, description, author}`
-- `POST /rebase`   `{change_id, new_parents}`
-- `POST /merge`    `{base, ours, theirs}`
-- `GET  /log`      列表
-- `GET  /change/{id}` 单项
+change-native 智能协议（HTTP/JSON + 二进制 bundle，h1+h2c 双栈）：
 
-server 后端可用 `store.OpenPostgres` 换成 Postgres；`change`/`merge` 逻辑零改动。
+- `POST /repo/{ns}/{name}/advertise`  读 ACL（列出 revision/ref）
+- `POST /repo/{ns}/{name}/fetch`      读 ACL（增量 bundle）
+- `POST /repo/{ns}/{name}/push`       写 ACL + 分支白名单 + 非快进拒绝 + 原子事务
+
+鉴权/审计/加密见 §15。
 
 ## 9. 与 jj 的对比（我们简化了什么 / 保留了哪些核心）
 
-**保留（与 jj 同等能力）**：change_id 稳定、内容寻址、3-way 合并 + 一等冲突、tree/blob 对象模型。
+**保留（与 jj 同等能力）**：revision_id 稳定、内容寻址、3-way 合并 + 一等冲突、tree/blob 对象模型。
 
 **简化（我们的设计取舍）**：
 | 丢弃 | jj 对应 | 收益 |
@@ -141,7 +142,7 @@ server 后端可用 `store.OpenPostgres` 换成 Postgres；`change`/`merge` 逻�
 | Git 兼容层 | git_backend/git 命令 (34k行) | 砍掉 |
 | 操作日志/undo | op_store/operation (~2k行) | 砍掉（无 oplog） |
 | 工作副本 mtime | local_working_copy (~3.2k行) | 砍掉（无实时跟踪） |
-| revset 大语言 | revset.rs (6.5k行) | 精简为 @ / change_id |
+| revset 大语言 | revset.rs (6.5k行) | 精简为 @ / revision_id |
 | 模板/富diff/签名 | templates/gpg | 砍掉 |
 
 **代码规模**：核心库约 1.6k 行 Go（相较 jj ~267k Rust）。保留引擎核心（对象模型、树合并、可插拔存储），砍掉网络/oplog/工作副本/Git 兼容/UX 层。
@@ -152,26 +153,22 @@ server 后端可用 `store.OpenPostgres` 换成 Postgres；`change`/`merge` 逻�
 init / commit / amend / log / show
 diff <shaA> <shaB>            文件级差异（A/M/D）
 checkout <sha> [DEST]         把 snapshot 的树落到文件系统
-rebase <change> --onto <sha>  change 改父（change_id 稳定，sha 变）
-squash <change>               change 吸收进父 change（父 change_id 稳定）
+rebase <revision> --onto <sha> revision 改父（revision_id 稳定，sha 变）
+squash <revision>             revision 吸收进父 revision（父 revision_id 稳定）
 merge --base/--ours/--theirs  3-way 树合并（一等冲突）
-bookmark <name> <change>      可变引用 -> change
-tag <name> <change>           不可变引用 -> change
-refs                          列出所有 bookmark/tag
-rev <expr>                    解析修订（@ / <change_id>）
+branch <name> <revision>      可变引用 -> revision（派生独立 revision）
+tag <name> <revision>         不可变引用 -> revision
+refs                          列出所有 branch/tag
+rev <expr>                    解析修订（@ / <revision_id>）
+remote add/remove             远端配置（token 加密存储）
+fetch/pull/push <remote>      智能协议（增量、token 鉴权、非快进 409）
+git-pull/git-push <url>       git 互操作（见 §13.1）
+gc [--dry-run] / verify       维护（见 §13.2）
 ```
 
-## 11. API（easylab，本次补充）
+## 11. 协议端点（server 库）
 
-```
-POST /commit      {change_id?, parents[], tree_id, description, author?}
-POST /rebase      {change_id, new_parents[]}
-POST /squash      {change_id}
-POST /merge       {base, ours, theirs}
-POST /ref/{name}  {kind: bookmark|tag, target}
-DELETE /ref/{name}
-GET  /log / /refs / /change/{id} / /diff/{a}/{b}
-```
+见 §8。easylab 通过 `server.New(cs, sink)` 复用同一协议 handler（`/api/v1` 托管 API 是 easylab 自己的 mux，不在本模块）。
 
 ## 12. 与 jj「文件能否存 DB」的相回回应
 
@@ -200,6 +197,37 @@ EasyVCS 通过 **go-git** 与真实 git 仓库走 **smart protocol** 互操作�
 
 - `gc [--dry-run]`：回收未被任何 snapshot 引用的孤儿对象（内容寻址只增）。
 - `verify`：一致性校验（snapshot 树可读、引用对象存在）。
+
+## 15. 安全模型（P1/P2 加固后）
+
+### 鉴权
+- Bearer token 每请求 `store.LookupToken` 解析；**token 只存 SHA-256**（创建时返回一次明文）。
+- Token level：`read`（只读）/ `write`（默认）；read-level token push 一律 403。
+
+### ACL（两级）
+- **仓库级**：`namespace_members.role` ∈ `readonly|member|admin|owner`。写（push）要求非 readonly；私有库读要求成员或开放实例。
+- **分支级**：`branch_acl(repo,user,branch)` 白名单，只作用于 push；用户无行 = 沿用仓库角色，有行 = 仅列出的分支可推。
+- 开放实例（无任何用户）匿名可读写；一旦创建首个用户即关闭。
+- `kind=mirror` 的仓库拒绝一切 push（只读镜像）。
+
+### 审计
+- `AuditSink` 接口 + `audit_log` 表（append-only，无 undo）。
+- 记录：动作（advertise/fetch/push）、仓库、用户、IP、结果（ok/denied）、详情。
+- XFF 仅在设置 `EASYVCS_TRUSTED_PROXY` 时采信（默认只记 socket 地址）。
+
+### Secret 加密
+- `EASYVCS_SECRET_KEY`（AES-GCM，`enc:` 前缀标记）；缺省明文兼容。
+- 覆盖列：`remotes.token`、`repositories.mirror_token`、`push_mirrors.token`。
+
+### HTTP 加固
+- `http.Server` 超时（ReadHeader 10s / Read+Write 10min / Idle 2min）、`MaxHeaderBytes 1MiB`。
+- 请求体上限 `http.MaxBytesReader`（默认 512MiB，`EASYVCS_MAX_BODY` 可调，超限 413）；gzip 解压上限 16GiB。
+- 5xx 响应收敛为通用文案，原始错误只进服务端日志。
+
+### 原子性
+- push 全程单事务（`transfer.ApplyTx`：objects+snapshots+revisions+refs 全进全出）。
+- 每 repo 互斥锁串行化"非快进检查 → 应用"，消除 TOCTOU。
+- SQLite：WAL + busy_timeout + 单连接池；事务内不做池读（预读后开事务）。
 
 ## 14. EasyLab 开发/部署平台（ops）
 

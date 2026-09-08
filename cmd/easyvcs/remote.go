@@ -435,7 +435,7 @@ func doFetch(repo *store.Repo, args []string) error {
 	full := baseForRepo(rem.URL, repo.RepoRef())
 
 	var adv advertiseResp
-	if err := postJSON(full+"/advertise", advertiseReq{Have: currentRevisionIDs(repo)}, &adv, ""); err != nil {
+	if err := postJSON(full+"/advertise", advertiseReq{Have: currentRevisionIDs(repo)}, &adv, rem.Token); err != nil {
 		return err
 	}
 	return recordFetchedRefs(repo, rem.Name, adv.Refs, rem.URL, only)
@@ -517,7 +517,7 @@ func cmdPull(c *ctx) {
 	full := baseForRepo(rem.URL, repo.RepoRef())
 
 	var adv advertiseResp
-	if err := postJSON(full+"/advertise", advertiseReq{Have: currentRevisionIDs(repo)}, &adv, ""); err != nil {
+	if err := postJSON(full+"/advertise", advertiseReq{Have: currentRevisionIDs(repo)}, &adv, rem.Token); err != nil {
 		fmt.Fprintln(os.Stderr, "pull:", err)
 		os.Exit(1)
 	}
@@ -577,7 +577,7 @@ func doPull(repo *store.Repo, args []string) error {
 	full := baseForRepo(rem.URL, repo.RepoRef())
 
 	var adv advertiseResp
-	if err := postJSON(full+"/advertise", advertiseReq{Have: currentRevisionIDs(repo)}, &adv, ""); err != nil {
+	if err := postJSON(full+"/advertise", advertiseReq{Have: currentRevisionIDs(repo)}, &adv, rem.Token); err != nil {
 		return err
 	}
 	var fetchReq advertiseReq = advertiseReq{
@@ -613,10 +613,9 @@ func collaborativePull(c *ctx, repo *store.Repo, rem *store.Remote, full string,
 		localRef = &store.Ref{Name: branch, Kind: store.RefBranch}
 	}
 
-	if err := postJSON(full+"/fetch", fetchReq, nil, ""); err != nil {
-		return err
-	}
-	data, err := fetchRaw(full, fetchReq, "")
+	// Fetch the remote chain once; the bundle carries the objects needed to
+	// rebase the remote tip locally.
+	data, err := fetchRaw(full, fetchReq, rem.Token)
 	if err != nil {
 		return err
 	}
@@ -628,14 +627,11 @@ func collaborativePull(c *ctx, repo *store.Repo, rem *store.Remote, full string,
 		return err
 	}
 
-	// The remote tip's revision id (transferred object). Resolve to its current
-	// snapshot hash within this store.
-	remoteRev, err := repo.GetRevision(remoteTip)
-	if err != nil {
-		// Could not resolve the remote tip id; fall back to a plain apply.
-		return err
+	// Sanity-check the remote tip actually landed in this store before we
+	// rebase onto it (Apply above should have written it).
+	if _, err := repo.GetRevision(remoteTip); err != nil {
+		return fmt.Errorf("remote tip %s missing after fetch: %w", short(remoteTip), err)
 	}
-	_ = remoteRev // snapshot hash not needed here; rebase resolves it internally.
 
 	// Determine the local tip to rebase onto.
 	localTip := localRef.Target
@@ -782,33 +778,24 @@ func cmdPush(c *ctx) {
 	}
 
 	// Incremental push: advertise what the server currently holds (refs +
-	// revisions + objects), then send only a delta the server is missing. We
-	// also carry the refs we *expect* the server to hold (the remote refs seen
-	// on the last fetch/pull) so the server can reject a non-fast-forward.
-	expected, err := localRemoteRefs(repo, rem.Name)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "push:", err)
+	// revisions + objects), then send only a delta the server is missing.
+	var adv advertiseResp
+	if err := postJSON(full+"/advertise", advertiseReq{Have: currentRevisionIDs(repo)}, &adv, rem.Token); err != nil {
+		// Advertise failure is fatal: falling back to a "full" push built from
+		// local state would skip revisions the server lacks and leave dangling
+		// refs. The server is unreachable or rejecting us; surface that.
+		fmt.Fprintln(os.Stderr, "push: advertise failed:", err)
 		os.Exit(1)
 	}
-
-	var adv advertiseResp
-	if err := postJSON(full+"/advertise", advertiseReq{Have: currentRevisionIDs(repo)}, &adv, ""); err != nil {
-		// If the server cannot be reached or advertise fails, fall back to a
-		// full push (best-effort) so a simple remote still works.
-		fmt.Fprintln(os.Stderr, "push: advertise failed (falling back to full push):", err)
-		adv = advertiseResp{}
-	}
-	// Incremental: skip revisions/snapshots the server already advertises.
+	// Incremental: skip revisions/snapshots the server already advertises. An
+	// empty advertise means the server holds nothing yet: send the full bundle
+	// (have=nil) so every revision lands before the refs point at them.
 	have := adv.Changes
-	if len(have) == 0 {
-		have = currentRevisionIDs(repo)
-	}
 	b, err := transfer.Collect(repo, have, nil)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "push:", err)
 		os.Exit(1)
 	}
-	b.ExpectedRefs = expected
 
 	data, err := postBundle(full+"/push", b, rem.Token)
 	if err != nil {

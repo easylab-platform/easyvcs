@@ -103,6 +103,11 @@ func (w *Workspace) CommitFromChanges(parentHash object.ID, changes []FileChange
 	}
 	snap.RevisionHash = snapshotID(snap)
 
+	// Pre-read the root tree BEFORE opening the transaction: the sqlite pool
+	// has a single connection, so a mid-transaction read would deadlock (pool
+	// exhaustion).
+	rootTree := w.mustTree(snap.TreeID)
+
 	// Atomic transaction: objects + snapshot + revision.
 	tx := w.store.BeginTx()
 	defer func() { _ = tx.Rollback() }()
@@ -111,7 +116,7 @@ func (w *Workspace) CommitFromChanges(parentHash object.ID, changes []FileChange
 	// We re-walk the tree to collect all referenced blob/tree objects so they are
 	// persisted. Blobs were created via WriteBlob (already persisted individually)
 	// but to be safe we write the root tree object here.
-	treeObj := &object.Object{Kind: object.KindTree, Tree: w.mustTree(snap.TreeID)}
+	treeObj := &object.Object{Kind: object.KindTree, Tree: rootTree}
 	if err := w.store.WriteObjectsBatchTx(tx, []*object.Object{treeObj}); err != nil {
 		return nil, nil, err
 	}

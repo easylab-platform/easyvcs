@@ -62,4 +62,4 @@ CGO_ENABLED=0 go build -o easyvcs-server ./cmd/server
 
 `github.com/easylab-platform/easyvcs`. It is consumed as a library by
 `github.com/easylab-platform/easylab` (the server, agent bridge, and ops
-platform).
+platform). Licensed under MIT (see LICENSE).

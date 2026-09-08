@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 
@@ -24,6 +25,10 @@ import (
 type CentralStore struct {
 	d    *sqlDialect
 	root string
+	// openKnown/openValue cache instanceIsOpen(); openMu guards them.
+	openMu    sync.Mutex
+	openKnown bool
+	openValue bool
 }
 
 
@@ -45,12 +50,16 @@ func HomeDir() string {
 func DBPath() string { return filepath.Join(HomeDir(), DefaultDBFile) }
 
 // SetWAL enables SQLite WAL mode for safe concurrent access across processes
-// (many workspaces sharing one DB). No-op for Postgres/MySQL.
+// (many workspaces sharing one DB), plus a busy timeout so concurrent writers
+// queue instead of failing with SQLITE_BUSY. No-op for Postgres/MySQL.
 func (s *CentralStore) SetWAL() error {
 	if !s.d.isSQLite() {
 		return nil
 	}
 	if err := s.d.gdb.Exec("PRAGMA journal_mode=WAL").Error; err != nil {
+		return err
+	}
+	if err := s.d.gdb.Exec("PRAGMA busy_timeout=10000").Error; err != nil {
 		return err
 	}
 	return nil
@@ -83,13 +92,7 @@ func (s *CentralStore) cleanupStaleColumns() error {
 			"SELECT EXISTS (SELECT 1 FROM pragma_table_info(?) WHERE name = ?)",
 			table, col,
 		).Scan(&exists).Error; err != nil {
-			// pragma_table_info is supported on SQLite 3.16+; on failure, fall
-			// back to a tolerant SELECT from sqlite_master.
-			if err2 := s.d.gdb.Raw(
-				"SELECT EXISTS (SELECT 1 FROM pragma_table_info(s.name) WHERE p.name = ?) FROM pragma_table_info(?) s",
-			).Error; err2 != nil {
-				return err
-			}
+			return err
 		}
 		if !exists {
 			continue
@@ -156,21 +159,26 @@ func (s *CentralStore) RepoExists(r RepoRef) (bool, error) {
 	return count > 0, nil
 }
 
-// Delete removes a repository and its scoped metadata.
+// Delete removes a repository and all of its scoped metadata. Reviews and
+// comments are removed via a subquery on the repo's MR ids; any failure is
+// returned (no silent partial deletes).
 func (s *CentralStore) Delete(r RepoRef) error {
 	repo, err := s.OpenRepo(r)
 	if err != nil {
 		return err
 	}
-	for _, table := range []any{&snapshotRow{}, &revisionRow{}, &refRow{}, &mergeRequestRow{}} {
+	mrIDs := s.d.gdb.Model(&mergeRequestRow{}).Select("id").Where("repo_id=?", repo.repoID)
+	for _, table := range []any{&snapshotRow{}, &revisionRow{}, &refRow{}, &mergeRequestRow{}, &branchACLRow{}, &remoteRow{}, &remoteRefRow{}, &pushMirrorRow{}, &workspaceRow{}, &gitRevisionLinkRow{}} {
 		if err := s.d.gdb.Where("repo_id=?", repo.repoID).Delete(table).Error; err != nil {
 			return err
 		}
 	}
-	// Delete MR reviews/comments via a subquery on the repo's MR ids.
-	sub := s.d.gdb.Model(&mergeRequestRow{}).Select("id").Where("repo_id=?", repo.repoID)
-	_ = s.d.gdb.Where("mr_id IN (?)", sub).Delete(&mrReviewRow{}).Error
-	_ = s.d.gdb.Where("mr_id IN (?)", s.d.gdb.Model(&mergeRequestRow{}).Select("id").Where("repo_id=?", repo.repoID)).Delete(&mrCommentRow{}).Error
+	if err := s.d.gdb.Where("mr_id IN (?)", mrIDs).Delete(&mrReviewRow{}).Error; err != nil {
+		return err
+	}
+	if err := s.d.gdb.Where("mr_id IN (?)", mrIDs).Delete(&mrCommentRow{}).Error; err != nil {
+		return err
+	}
 	if err := s.d.gdb.Delete(&repoRow{}, repo.repoID).Error; err != nil {
 		return err
 	}
@@ -576,6 +584,13 @@ func (r *Repo) WriteObjectsBatchTx(tx *gorm.DB, objs []*object.Object) error {
 // BeginTx starts a GORM transaction on the central store.
 func (r *Repo) BeginTx() *gorm.DB { return r.cs.d.gdb.Begin() }
 
+// Transaction runs fn inside a database transaction, committing on success and
+// rolling back on error or panic. This is the preferred entry point for atomic
+// multi-table writes (BeginTx + manual Commit is easy to leak).
+func (r *Repo) Transaction(fn func(tx *gorm.DB) error) error {
+	return r.cs.d.gdb.Transaction(fn)
+}
+
 // toRevisionRow maps a Revision to its persistent row.
 func (r *Repo) toRevisionRow(rev *Revision) *revisionRow {
 	changed, _ := json.Marshal(rev.ChangedPaths)
@@ -651,6 +666,15 @@ func (r *Repo) ListRevisions() ([]*Revision, error) {
 func (r *Repo) PutRef(ref *Ref) error {
 	row := &refRow{RepoID: r.repoID, Name: ref.Name, Kind: string(ref.Kind), Target: ref.Target}
 	return r.cs.d.gdb.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "repo_id"}, {Name: "name"}},
+		UpdateAll: true,
+	}).Create(row).Error
+}
+
+// PutRefTx upserts a ref within an open transaction.
+func (r *Repo) PutRefTx(tx *gorm.DB, ref *Ref) error {
+	row := &refRow{RepoID: r.repoID, Name: ref.Name, Kind: string(ref.Kind), Target: ref.Target}
+	return tx.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "repo_id"}, {Name: "name"}},
 		UpdateAll: true,
 	}).Create(row).Error

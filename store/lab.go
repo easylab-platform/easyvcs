@@ -1,6 +1,8 @@
 package store
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -98,16 +100,15 @@ var ErrUsernameTaken = errors.New("store: username already exists")
 // ErrTokenNotFound is returned when a token is unknown.
 var ErrTokenNotFound = errors.New("store: token not found")
 
-// ErrUnchangedPassword is a legacy placeholder kept for interface stability.
-var ErrUnchangedPassword = errors.New("store: password unchanged")
-
-// CreateUser inserts a new user.
+// CreateUser inserts a new user. Creating the first user closes the instance
+// (anonymous access stops being allowed).
 func (s *CentralStore) CreateUser(username, displayName string) (*User, error) {
 	now := time.Now().UTC().UnixMilli()
 	row := &userRow{Username: username, DisplayName: displayName, Created: now}
 	if err := s.d.gdb.Create(row).Error; err != nil {
 		return nil, err
 	}
+	s.invalidateOpenCache()
 	return &User{ID: row.ID, Username: username, DisplayName: displayName, Created: time.UnixMilli(now)}, nil
 }
 
@@ -150,10 +151,23 @@ func (s *CentralStore) ListUsers() ([]*User, error) {
 	return out, nil
 }
 
-// CreateToken inserts a bearer token for a user.
+// hashToken derives the storage form of a bearer token: hex(SHA-256(token)).
+// Tokens are only ever compared by hash, so the database never holds the
+// credential itself. The plaintext value is returned by CreateToken exactly
+// once and must be shown to the user then.
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// CreateToken inserts a bearer token for a user. The token is stored as its
+// SHA-256 hash; the returned Token carries the plaintext for one-time display.
 func (s *CentralStore) CreateToken(token string, userID int64, level string) (*Token, error) {
+	if level != "read" && level != "write" {
+		return nil, fmt.Errorf("invalid token level %q (read|write)", level)
+	}
 	now := time.Now().UTC().UnixMilli()
-	row := &tokenRow{Token: token, UserID: userID, Level: level, Created: now}
+	row := &tokenRow{Token: hashToken(token), UserID: userID, Level: level, Created: now}
 	if err := s.d.gdb.Create(row).Error; err != nil {
 		return nil, err
 	}
@@ -161,21 +175,23 @@ func (s *CentralStore) CreateToken(token string, userID int64, level string) (*T
 }
 
 // LookupToken resolves a token string to its user and level. It returns
-// ErrTokenNotFound when the token is unknown.
+// ErrTokenNotFound when the token is unknown. The plaintext token is echoed
+// back in the returned record for interface stability (the caller supplied it).
 func (s *CentralStore) LookupToken(token string) (*Token, error) {
 	var row tokenRow
-	err := s.d.gdb.Where("token=?", token).First(&row).Error
+	err := s.d.gdb.Where("token=?", hashToken(token)).First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrTokenNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &Token{ID: row.ID, Token: row.Token, UserID: row.UserID, Level: row.Level, Created: time.UnixMilli(row.Created)}, nil
+	return &Token{ID: row.ID, Token: token, UserID: row.UserID, Level: row.Level, Created: time.UnixMilli(row.Created)}, nil
 }
 
-// ListTokens returns all tokens for a user (omitting the secret for brevity is
-// not possible here since the token is the primary text; callers may skip it).
+// ListTokens returns all tokens for a user. The stored value is a SHA-256 hash
+// and is NOT returned; Token.Token is empty (the plaintext is only available
+// from CreateToken at creation time).
 func (s *CentralStore) ListTokens(userID int64) ([]*Token, error) {
 	var rows []tokenRow
 	if err := s.d.gdb.Where("user_id=?", userID).Find(&rows).Error; err != nil {
@@ -183,14 +199,14 @@ func (s *CentralStore) ListTokens(userID int64) ([]*Token, error) {
 	}
 	out := make([]*Token, 0, len(rows))
 	for i := range rows {
-		out = append(out, &Token{ID: rows[i].ID, Token: rows[i].Token, UserID: rows[i].UserID, Level: rows[i].Level, Created: time.UnixMilli(rows[i].Created)})
+		out = append(out, &Token{ID: rows[i].ID, Token: "", UserID: rows[i].UserID, Level: rows[i].Level, Created: time.UnixMilli(rows[i].Created)})
 	}
 	return out, nil
 }
 
 // DeleteToken removes a token by its secret value.
 func (s *CentralStore) DeleteToken(token string) error {
-	res := s.d.gdb.Where("token=?", token).Delete(&tokenRow{})
+	res := s.d.gdb.Where("token=?", hashToken(token)).Delete(&tokenRow{})
 	if res.Error != nil {
 		return res.Error
 	}
@@ -200,8 +216,29 @@ func (s *CentralStore) DeleteToken(token string) error {
 	return nil
 }
 
+// Namespace member roles. Write access requires member/admin/owner; readonly
+// grants read only.
+const (
+	RoleReadonly = "readonly"
+	RoleMember   = "member"
+	RoleAdmin    = "admin"
+	RoleOwner    = "owner"
+)
+
+// validRole reports whether role is one of the four member roles.
+func validRole(role string) bool {
+	switch role {
+	case RoleReadonly, RoleMember, RoleAdmin, RoleOwner:
+		return true
+	}
+	return false
+}
+
 // AddNamespaceMember grants a user membership in a namespace with a role.
 func (s *CentralStore) AddNamespaceMember(namespace string, userID int64, role string) error {
+	if !validRole(role) {
+		return fmt.Errorf("invalid role %q (readonly|member|admin|owner)", role)
+	}
 	row := &namespaceMemberRow{Namespace: namespace, UserID: userID, Role: role}
 	return s.d.gdb.Clauses(clause.OnConflict{UpdateAll: true}).Create(row).Error
 }
@@ -285,15 +322,32 @@ func (s *CentralStore) UserCanReadRepo(r RepoRef, userID *int64) bool {
 	return s.IsNamespaceMember(r.Namespace, *userID)
 }
 
-// instanceIsOpen reports whether no users and no tokens are registered, i.e. a
-// fresh single-user fixture where there is nothing to hide and no auth to gate
-// on. Callers use it to keep dev flows and unit tests frictionless.
+// instanceIsOpen reports whether no users are registered, i.e. a fresh
+// single-user fixture where there is nothing to hide and no auth to gate on.
+// Callers use it to keep dev flows and unit tests frictionless. The result is
+// cached and invalidated whenever a user is created, so per-request ACL checks
+// don't rescan the users table.
 func (s *CentralStore) instanceIsOpen() bool {
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+	if s.openKnown {
+		return s.openValue
+	}
 	users, err := s.ListUsers()
 	if err != nil {
 		return false
 	}
-	return len(users) == 0
+	s.openValue = len(users) == 0
+	s.openKnown = true
+	return s.openValue
+}
+
+// invalidateOpenCache drops the cached instanceIsOpen result (called whenever
+// a user is created, which is the only transition from open to closed).
+func (s *CentralStore) invalidateOpenCache() {
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+	s.openKnown = false
 }
 
 // IsOpenInstance is the exported form of instanceIsOpen for callers outside the
@@ -303,7 +357,8 @@ func (s *CentralStore) IsOpenInstance() bool { return s.instanceIsOpen() }
 
 // UserCanWriteRepo reports whether a user may write to a repository (push).
 // Write access requires the instance to be open OR the user to be a namespace
-// member. A nil userID is only allowed when the instance is open.
+// member with a write-capable role (member/admin/owner; readonly is denied).
+// A nil userID is only allowed when the instance is open.
 func (s *CentralStore) UserCanWriteRepo(r RepoRef, userID *int64) bool {
 	if s.instanceIsOpen() {
 		return true
@@ -311,8 +366,16 @@ func (s *CentralStore) UserCanWriteRepo(r RepoRef, userID *int64) bool {
 	if userID == nil {
 		return false
 	}
-	return s.IsNamespaceMember(r.Namespace, *userID)
+	m, err := s.GetNamespaceMember(r.Namespace, *userID)
+	if err != nil {
+		return false
+	}
+	return m.Role != RoleReadonly
 }
+
+// RawQuery exposes a raw GORM query on the central store (test/diagnostic
+// helper; prefer the typed methods above).
+func (s *CentralStore) RawQuery(sql string) *gorm.DB { return s.d.gdb.Raw(sql) }
 
 // RepoMeta returns the hosting metadata for a repository.
 func (r *Repo) RepoMeta() (RepoMeta, error) {

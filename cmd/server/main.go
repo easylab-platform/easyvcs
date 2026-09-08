@@ -7,6 +7,10 @@
 // Auth isn't configured by env here: tokens/users are resolved from the store
 // (store.LookupToken) on each request, and ACLs come from namespace_members /
 // branch_acl. When the store has no users the instance is open (anonymous).
+//
+// Operational env: EASYVCS_MAX_BODY bounds request bodies (bytes; default
+// 512MiB). Set EASYVCS_TRUSTED_PROXY to honor X-Forwarded-For for audit logs
+// (only when running behind a reverse proxy you control).
 package main
 
 import (
@@ -14,6 +18,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/easylab-platform/easyvcs/server"
 	"github.com/easylab-platform/easyvcs/store"
@@ -35,11 +41,27 @@ func main() {
 	}
 
 	srv := server.New(cs, nil)
+	if mb := envOr("EASYVCS_MAX_BODY", ""); mb != "" {
+		if n, err := strconv.ParseInt(mb, 10, 64); err == nil {
+			srv.SetMaxBody(n)
+		} else {
+			log.Fatalf("EASYVCS_MAX_BODY: invalid size %q", mb)
+		}
+	}
 
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
-	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler(), Protocols: protocols}
+	httpSrv := &http.Server{
+		Addr:              *addr,
+		Handler:           srv.Handler(),
+		Protocols:         protocols,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       10 * time.Minute, // large pushes are slow to upload
+		WriteTimeout:      10 * time.Minute, // large fetches are slow to stream
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
+	}
 	log.Printf("easyvcs-server listening on %s (db %s)", *addr, store.DBPath())
 	log.Fatal(httpSrv.ListenAndServe())
 }
