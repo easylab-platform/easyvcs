@@ -253,7 +253,7 @@ func trimTrailingSlash(s string) string {
 	return s
 }
 
-func currentChangeIDs(repo *store.Repo) []string {
+func currentRevisionIDs(repo *store.Repo) []string {
 	ch, err := repo.ListRevisions()
 	if err != nil {
 		return nil
@@ -299,7 +299,7 @@ func doFetch(repo *store.Repo, args []string) error {
 	full := baseForRepo(rem.URL, repo.RepoRef())
 
 	var adv advertiseResp
-	if err := postJSON(full+"/advertise", advertiseReq{Have: currentChangeIDs(repo)}, &adv, ""); err != nil {
+	if err := postJSON(full+"/advertise", advertiseReq{Have: currentRevisionIDs(repo)}, &adv, ""); err != nil {
 		return err
 	}
 
@@ -372,14 +372,14 @@ func cmdPull(c *ctx) {
 	full := baseForRepo(rem.URL, repo.RepoRef())
 
 	var adv advertiseResp
-	if err := postJSON(full+"/advertise", advertiseReq{Have: currentChangeIDs(repo)}, &adv, ""); err != nil {
+	if err := postJSON(full+"/advertise", advertiseReq{Have: currentRevisionIDs(repo)}, &adv, ""); err != nil {
 		fmt.Fprintln(os.Stderr, "pull:", err)
 		os.Exit(1)
 	}
 
 	// Restrict the fetch to just that chain, and capture the remote tip.
 	var fetchReq advertiseReq = advertiseReq{
-		Have:        currentChangeIDs(repo),
+		Have:        currentRevisionIDs(repo),
 		HaveObjects: objectIDsAsStrings(ownObjects(repo)),
 	}
 	remoteTip := ""
@@ -427,11 +427,11 @@ func doPull(repo *store.Repo, args []string) error {
 	full := baseForRepo(rem.URL, repo.RepoRef())
 
 	var adv advertiseResp
-	if err := postJSON(full+"/advertise", advertiseReq{Have: currentChangeIDs(repo)}, &adv, ""); err != nil {
+	if err := postJSON(full+"/advertise", advertiseReq{Have: currentRevisionIDs(repo)}, &adv, ""); err != nil {
 		return err
 	}
 	var fetchReq advertiseReq = advertiseReq{
-		Have:        currentChangeIDs(repo),
+		Have:        currentRevisionIDs(repo),
 		HaveObjects: objectIDsAsStrings(ownObjects(repo)),
 	}
 	remoteTip := ""
@@ -491,7 +491,7 @@ func collaborativePull(c *ctx, repo *store.Repo, rem *store.Remote, full string,
 	// Determine the local tip to rebase onto.
 	localTip := localRef.Target
 	if localTip == "" {
-		// No local tip yet: place the remote change directly as the local tip.
+		// No local tip yet: place the remote revision directly as the local tip.
 		if _, err := ws.SetRef(branch, store.RefBranch, remoteTip); err != nil {
 			return err
 		}
@@ -617,7 +617,7 @@ func cmdGitPull(c *ctx) {
 		os.Exit(1)
 	}
 
-	parentSnap, _ := ws.ParentsOfChange(marker.CurrentRevision)
+	parentSnap, _ := ws.ParentsOfRevision(marker.CurrentRevision)
 	if len(parentSnap) == 0 {
 		parentSnap = repoTip(repo)
 	}
@@ -626,12 +626,12 @@ func cmdGitPull(c *ctx) {
 		fmt.Fprintln(os.Stderr, "git-pull:", err)
 		os.Exit(1)
 	}
-	// Record the incoming git tree as a single change. If the workspace has a
-	// current change, amend it (finalize that change to the incoming content);
-	// otherwise create a new change linked to the tip.
-	changeID := marker.CurrentRevision
+	// Record the incoming git tree as a single revision. If the workspace has a
+	// current revision, amend it (finalize that change to the incoming content);
+	// otherwise create a new revision linked to the tip.
+	revisionID := marker.CurrentRevision
 	snap, ch, err := ws.Commit(revision.CommitParams{
-		RevisionID:  changeID,
+		RevisionID:  revisionID,
 		Parents:     parentSnap,
 		TreeID:      treeID,
 		Description: "pull from git: " + gitURLOrDir,
@@ -644,7 +644,7 @@ func cmdGitPull(c *ctx) {
 	marker.CurrentRevision = ch.ID
 	_ = store.WriteMarker(".", marker)
 	_ = c.cs.PutWorkspace(&store.WorkspaceRow{Path: ".", Repo: marker.Repo, CurrentRevision: ch.ID, Branch: marker.Branch})
-	fmt.Printf("pulled from git as change %s -> snapshot %s\n", short(ch.ID), short(snap.RevisionHash.String()))
+	fmt.Printf("pulled from git as revision %s -> snapshot %s\n", short(ch.ID), short(snap.RevisionHash.String()))
 }
 
 func cmdGitPush(c *ctx) {
@@ -668,7 +668,7 @@ func cmdGitPush(c *ctx) {
 	defer os.RemoveAll(tmp)
 	cur, err := repo.GetRevision(marker.CurrentRevision)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "git-push: no current change:", err)
+		fmt.Fprintln(os.Stderr, "git-push: no current revision:", err)
 		os.Exit(1)
 	}
 	snap, err := repo.GetSnapshot(cur.Hash)
@@ -713,7 +713,7 @@ func cmdGitPush(c *ctx) {
 		fmt.Fprintln(os.Stderr, "git-push:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("pushed current change to git %s\n", gitDest)
+	fmt.Printf("pushed current revision to git %s\n", gitDest)
 }
 
 func gitArg() string {

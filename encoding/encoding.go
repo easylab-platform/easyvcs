@@ -93,8 +93,8 @@ func DecodeSnapshotMeta(payload []byte) (SnapshotMeta, error) {
 	return SnapshotMeta{Parents: parents, Author: Author{Name: name, Email: email}, Description: desc}, nil
 }
 
-// EncodeChangeBody encodes a change's current snapshot id and fork_from.
-func EncodeChangeBody(current object.ID, forkFrom string) []byte {
+// EncodeRevisionBody encodes a revision's current snapshot id and fork_from.
+func EncodeRevisionBody(current object.ID, forkFrom string) []byte {
 	buf := make([]byte, 0, 40)
 	buf = append(buf, current[:]...)
 	buf = appendUvarint(buf, uint64(len(forkFrom)))
@@ -102,10 +102,10 @@ func EncodeChangeBody(current object.ID, forkFrom string) []byte {
 	return buf
 }
 
-// DecodeChangeBody decodes a change body.
-func DecodeChangeBody(body []byte) (current object.ID, forkFrom string, err error) {
+// DecodeRevisionBody decodes a revision body.
+func DecodeRevisionBody(body []byte) (current object.ID, forkFrom string, err error) {
 	if len(body) < 32 {
-		return object.ID{}, "", errors.New("truncated change body")
+		return object.ID{}, "", errors.New("truncated revision body")
 	}
 	var cur object.ID
 	copy(cur[:], body[:32])
@@ -113,7 +113,7 @@ func DecodeChangeBody(body []byte) (current object.ID, forkFrom string, err erro
 	ln, adv := readUvarint(body[off:])
 	off += adv
 	if off+int(ln) > len(body) {
-		return object.ID{}, "", errors.New("truncated change fork_from")
+		return object.ID{}, "", errors.New("truncated revision fork_from")
 	}
 	fork := string(body[off : off+int(ln)])
 	return cur, fork, nil

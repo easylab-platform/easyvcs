@@ -59,9 +59,9 @@ func TestMarshalUnmarshalBinary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(back.Changes) != len(b.Changes) || len(back.Objects) != len(b.Objects) {
+	if len(back.Revisions) != len(b.Revisions) || len(back.Objects) != len(b.Objects) {
 		t.Fatalf("frame mismatch: changes %d vs %d, objects %d vs %d",
-			len(back.Changes), len(b.Changes), len(back.Objects), len(b.Objects))
+			len(back.Revisions), len(b.Revisions), len(back.Objects), len(b.Objects))
 	}
 	if back.Repo != b.Repo {
 		t.Fatal("repo mismatch")
@@ -160,8 +160,8 @@ func TestCollectDeltaSkipsKnownObjects(t *testing.T) {
 	}
 	// Collect with a "have" list that includes the revision id skips it.
 	delta2, _ := Collect(repo, []string{"rev1"}, nil)
-	if len(delta2.Changes) != 0 {
-		t.Fatalf("delta with have=rev1 should skip change, got %d", len(delta2.Changes))
+	if len(delta2.Revisions) != 0 {
+		t.Fatalf("delta with have=rev1 should skip revision, got %d", len(delta2.Revisions))
 	}
 }
 

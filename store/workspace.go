@@ -15,8 +15,8 @@ const WorkspaceMarkerFile = ".easyvcs-workspace"
 
 // WorkspaceMarker is the pointer content stored at a working directory root. It
 // records which repository (namespace/name) this checkout belongs to and which
-// change is currently checked out. IgnoreHash tracks the hash of the ignore
-// files at the last commit so a change in .gitignore/.vcsignore can trigger
+// revision is currently checked out. IgnoreHash tracks the hash of the ignore
+// files at the last commit so a revision in .gitignore/.vcsignore can trigger
 // history rewriting.
 type WorkspaceMarker struct {
 	Repo            RepoRef `json:"repo"`

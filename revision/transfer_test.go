@@ -48,8 +48,8 @@ func TestTransferCollectApplyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(b.Changes) != 2 {
-		t.Fatalf("expected 2 changes, got %d", len(b.Changes))
+	if len(b.Revisions) != 2 {
+		t.Fatalf("expected 2 changes, got %d", len(b.Revisions))
 	}
 	if len(b.Refs) != 1 {
 		t.Fatalf("expected 1 ref, got %d", len(b.Refs))
@@ -82,5 +82,5 @@ func TestTransferCollectApplyRoundTrip(t *testing.T) {
 		t.Fatalf("repoB2 should have 1 ref, got %d", len(refs))
 	}
 	_ = repoB
-	t.Logf("transfer round-trip ok: %d changes, %d refs", len(changes), len(refs))
+	t.Logf("transfer round-trip ok: %d revisions, %d refs", len(changes), len(refs))
 }

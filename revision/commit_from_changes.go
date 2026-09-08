@@ -33,7 +33,7 @@ func (w *Workspace) CommitFromChanges(parentHash object.ID, changes []FileChange
 	revisionID := revisionIDOverride
 	if revisionID == "" {
 		var err error
-		revisionID, err = object.RandomChangeID()
+		revisionID, err = object.RandomRevisionID()
 		if err != nil {
 			return nil, nil, err
 		}

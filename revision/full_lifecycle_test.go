@@ -11,7 +11,7 @@ import (
 
 func mustRandomID(t *testing.T) string {
 	t.Helper()
-	id, err := object.RandomChangeID()
+	id, err := object.RandomRevisionID()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func (w *Workspace) storePut(snap *store.Snapshot, rev *store.Revision) error {
 // repository through its full lifecycle: commit chain, amends, content changes,
 // rebases, squashes, conflicts + resolve, branchs/tags, refs, file history,
 // diff, ignore rewriting, merge, and queries. It asserts invariants at each step
-// to ensure change-native semantics hold end-to-end.
+// to ensure revision-native semantics hold end-to-end.
 //
 // It runs against both the file-backed and SQLite backends via runBoth.
 func TestFullRepoLifecycle(t *testing.T) {
@@ -199,7 +199,7 @@ func TestFullRepoLifecycle(t *testing.T) {
 			t.Fatalf("merge atoms: %d", len(atoms))
 		}
 		// Commit the merged (conflicted) tree directly as a new revision, then
-		// resolve the conflict to "ours" and confirm the change id stays stable.
+		// resolve the conflict to "ours" and confirm the revision id stays stable.
 		confSnap := &store.Snapshot{
 			RevisionID: mustRandomID(t), Parents: nil, TreeID: mergedTree,
 			Description: "conflict", Author: store.Author{Name: "n"}, CommitTime: nowUtc(),
@@ -210,7 +210,7 @@ func TestFullRepoLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Resolve f.txt to side 0 (ours). Change id must be preserved.
+		// Resolve f.txt to side 0 (ours). revision id must be preserved.
 		resSnap, resRev, err := ws.Resolve(confRev.ID, "f.txt", 0)
 		if err != nil {
 			t.Fatal(err)

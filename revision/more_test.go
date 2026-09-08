@@ -46,7 +46,7 @@ func TestParentsAndSnapshotID(t *testing.T) {
 		if len(parents) != 1 || parents[0] != snap1.RevisionHash {
 			t.Fatalf("parents: %v", parents)
 		}
-		p2, _ := ws.ParentsOfChange(ch1.ID)
+		p2, _ := ws.ParentsOfRevision(ch1.ID)
 		if len(p2) != 0 {
 			t.Fatalf("root should have no parents, got %v", p2)
 		}
@@ -92,11 +92,8 @@ func TestAllSnapshotsAndResolveRevisions(t *testing.T) {
 		if len(ids3) != 1 || ids3[0] != snap1.RevisionHash {
 			t.Fatalf("resolve @-: %v", ids3)
 		}
-		// GetRevision + GetChange alias
+		// GetRevision lookup
 		if _, err := ws.GetRevision(ch1.ID); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := ws.GetChange(ch1.ID); err != nil {
 			t.Fatal(err)
 		}
 		// Missing revision

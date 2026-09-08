@@ -259,10 +259,10 @@ func BlobToString(data []byte) string {
 	return strings.TrimRight(string(data), "\n")
 }
 
-// RandomChangeID returns a random 16-byte change id encoded as 32 hex chars.
-// Change ids are generated once and never change (content-independent), unlike
+// RandomRevisionID returns a random 16-byte revision id encoded as 32 hex chars.
+// revision ids are generated once and never change (content-independent), unlike
 // object ids which are derived from content.
-func RandomChangeID() (string, error) {
+func RandomRevisionID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err

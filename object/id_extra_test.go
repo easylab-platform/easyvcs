@@ -10,8 +10,8 @@ func TestTreeID(t *testing.T) {
 	}
 }
 
-func TestRandomChangeIDErrPath(t *testing.T) {
-	// RandomChangeID with a failing rand is hard to force; just ensure it runs
+func TestRandomRevisionIDErrPath(t *testing.T) {
+	// RandomRevisionID with a failing rand is hard to force; just ensure it runs
 	// and second call differs (already covered). This exercises the success path.
 	_ = t
 }

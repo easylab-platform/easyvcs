@@ -608,7 +608,7 @@ func (w *Workspace) DiffBaseForRevision(revisionID string) (object.ID, error) {
 
 // FilesChanged returns the per-file change list for a revision, expressed
 // against its first-parent base (root -> empty). This is the "which files did
-// this revision change, and how" view.
+// this revision, and how" view.
 func (w *Workspace) FilesChanged(revisionID string) ([]FileChange, error) {
 	rev, err := w.store.GetRevision(revisionID)
 	if err != nil {

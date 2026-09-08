@@ -23,7 +23,7 @@ import (
 // source revision's message is used; if the source has no message either, an
 // error is returned (a derive must always carry a commit message).
 //
-// autoCommit controls what happens when the source is an uncommitted change
+// autoCommit controls what happens when the source is an uncommitted revision
 // (a revision with no commit message): with autoCommit true the derive proceeds
 // (the caller is asserting they want to finalize the fork point now); with
 // autoCommit false an error is returned, requiring the caller to commit the
@@ -56,7 +56,7 @@ func (w *Workspace) Derive(sourceRevisionID string, description string, autoComm
 		return nil, nil, fmt.Errorf("derive: a commit message is required")
 	}
 
-	newID, err := object.RandomChangeID()
+	newID, err := object.RandomRevisionID()
 	if err != nil {
 		return nil, nil, err
 	}

@@ -128,7 +128,7 @@ func TestSquashKeepsParentChangeID(t *testing.T) {
 			t.Fatal(err)
 		}
 		if parentCh.ID != baseCh.ID {
-			t.Fatalf("parent change id changed on squash: %s != %s", parentCh.ID, baseCh.ID)
+			t.Fatalf("parent revision id changed on squash: %s != %s", parentCh.ID, baseCh.ID)
 		}
 		if ns.RevisionHash == baseSnap.RevisionHash {
 			t.Fatalf("squash should produce a new snapshot sha")
@@ -228,12 +228,12 @@ func TestRebaseStableChangeID(t *testing.T) {
 			t.Fatal(err)
 		}
 		if ch.ID != childCh.ID {
-			t.Fatalf("rebase changed change id")
+			t.Fatalf("rebase changed revision id")
 		}
 		if reb.RevisionHash != childSnap.RevisionHash {
 			t.Fatalf("rebase onto immediate parent should be a no-op: %s != %s", shortID(reb.RevisionHash.String()), shortID(childSnap.RevisionHash.String()))
 		}
-		t.Logf("rebase stable: change=%s", shortID(ch.ID))
+		t.Logf("rebase stable: revision=%s", shortID(ch.ID))
 	})
 }
 

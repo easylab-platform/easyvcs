@@ -16,14 +16,14 @@ import (
 func pathKey(s string) string { return s }
 
 // RewriteHistoryWithIgnores rewrites all snapshots that are ancestors of
-// changeID so that any path now matched by the matcher is removed from every
-// affected snapshot's tree. Each rewritten snapshot keeps its change id and
+// revisionID so that any path now matched by the matcher is removed from every
+// affected snapshot's tree. Each rewritten snapshot keeps its revision id and
 // metadata; only the tree (and thus the snapshot id) changes. Descendants are
 // automatically rebased because they reference parent snapshot ids.
 //
 // It returns the number of snapshots rewritten.
-func (w *Workspace) RewriteHistoryWithIgnores(root string, m *ignore.Matcher, changeID string) (int, error) {
-	// Collect all ancestor revision ids (including changeID itself) via a BFS
+func (w *Workspace) RewriteHistoryWithIgnores(root string, m *ignore.Matcher, revisionID string) (int, error) {
+	// Collect all ancestor revision ids (including revisionID itself) via a BFS
 	// over parent snapshot ownership.
 	allRevisions, err := w.store.ListRevisions()
 	if err != nil {
@@ -40,7 +40,7 @@ func (w *Workspace) RewriteHistoryWithIgnores(root string, m *ignore.Matcher, ch
 
 	visited := map[string]bool{}
 	var order []string // breadth-first ancestors; not strictly topological
-	queue := []string{changeID}
+	queue := []string{revisionID}
 	for len(queue) > 0 {
 		id := queue[0]
 		queue = queue[1:]
@@ -129,7 +129,7 @@ func (w *Workspace) RewriteHistoryWithIgnores(root string, m *ignore.Matcher, ch
 		return nil
 	}
 	rewrittenByVisit = map[string]bool{}
-	if err := visit(changeID); err != nil {
+	if err := visit(revisionID); err != nil {
 		return 0, err
 	}
 	return rewritten, nil

@@ -185,10 +185,10 @@ func TestReadUvarintMultiByte(t *testing.T) {
 	}
 }
 
-func TestRandomChangeIDDistinct(t *testing.T) {
+func TestRandomRevisionIDDistinct(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 100; i++ {
-		id, _ := RandomChangeID()
+		id, _ := RandomRevisionID()
 		if seen[id] {
 			t.Fatalf("duplicate id %s", id)
 		}

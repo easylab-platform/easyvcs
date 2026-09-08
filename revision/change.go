@@ -1,7 +1,7 @@
 // Package revision implements the semantic layer of EasyVCS.
 //
 // It is the only package that depends on the store.RepoStore interface for
-// persistence; it encodes the two rules that make EasyVCS change-native:
+// persistence; it encodes the two rules that make EasyVCS revision-native:
 //
 //  1. A Revision has a stable id (revision_id) that is generated once and never
 //     modified, no matter how many times the revision is rebased, squashed, or
@@ -28,9 +28,6 @@ import (
 
 // ErrRevisionNotFound is returned when a revision id has no record.
 var ErrRevisionNotFound = errors.New("revision: not found")
-
-// ErrChangeNotFound is an alias kept for compatibility.
-var ErrChangeNotFound = ErrRevisionNotFound
 
 // Workspace is the semantic API over a repo-scoped store.
 type Workspace struct {
@@ -145,7 +142,7 @@ func (w *Workspace) Commit(p CommitParams) (*store.Snapshot, *store.Revision, er
 	revisionID := p.RevisionID
 	if revisionID == "" {
 		var err error
-		revisionID, err = object.RandomChangeID()
+		revisionID, err = object.RandomRevisionID()
 		if err != nil {
 			return nil, nil, err
 		}
@@ -268,10 +265,6 @@ func (w *Workspace) GetRevision(id string) (*store.Revision, error) {
 	return c, err
 }
 
-// GetChange is an alias of GetRevision kept for compatibility.
-func (w *Workspace) GetChange(id string) (*store.Revision, error) {
-	return w.GetRevision(id)
-}
 
 // ParentsOfRevision returns the parent snapshot ids of a revision's current
 // snapshot. If the revision or snapshot is missing, it returns an empty slice.
@@ -288,11 +281,6 @@ func (w *Workspace) ParentsOfRevision(revisionID string) ([]object.ID, error) {
 		return nil, nil
 	}
 	return snap.Parents, nil
-}
-
-// ParentsOfChange is an alias of ParentsOfRevision kept for compatibility.
-func (w *Workspace) ParentsOfChange(changeID string) ([]object.ID, error) {
-	return w.ParentsOfRevision(changeID)
 }
 
 // GetSnapshot returns a snapshot by id.
@@ -382,9 +370,4 @@ func findRevision(revisions []*store.Revision, id string) *store.Revision {
 		}
 	}
 	return nil
-}
-
-// findChange is an alias of findRevision kept for compatibility.
-func findChange(revisions []*store.Revision, id string) *store.Revision {
-	return findRevision(revisions, id)
 }

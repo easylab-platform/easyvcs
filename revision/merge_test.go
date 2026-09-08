@@ -76,7 +76,7 @@ func TestMerge3WayConflict(t *testing.T) {
 }
 
 // TestResolveConflictChangeIDStable verifies resolve picks a side, removes the
-// conflict from the tree, and keeps the change id unchanged.
+// conflict from the tree, and keeps the revision id unchanged.
 func TestResolveConflictChangeIDStable(t *testing.T) {
 	runBoth(t, func(t *testing.T, ws *Workspace, dir string) {
 		baseTree := object.NewTree()
@@ -98,7 +98,7 @@ func TestResolveConflictChangeIDStable(t *testing.T) {
 		if len(atoms) != 1 {
 			t.Fatalf("expected 1 conflict atom, got %d", len(atoms))
 		}
-		// Commit the conflicted tree as a change.
+		// Commit the conflicted tree as a revision.
 		snap, ch, err := ws.Commit(CommitParams{TreeID: merged, Description: "conflicted", Author: store.Author{Name: "t"}})
 		if err != nil {
 			t.Fatal(err)
@@ -111,7 +111,7 @@ func TestResolveConflictChangeIDStable(t *testing.T) {
 			t.Fatal(err)
 		}
 		if ch2.ID != ch.ID {
-			t.Fatalf("change id changed on resolve: %s -> %s", ch.ID, ch2.ID)
+			t.Fatalf("revision id changed on resolve: %s -> %s", ch.ID, ch2.ID)
 		}
 		// The new tree must have no conflict and contain ours content.
 		nt := ws.mustTree(ns.TreeID)
@@ -125,7 +125,7 @@ func TestResolveConflictChangeIDStable(t *testing.T) {
 		if string(blob) != "ours" {
 			t.Fatalf("resolved content should be 'ours', got %q", string(blob))
 		}
-		t.Logf("resolve ok: change=%s unchanged; content=%s", shortID(ch.ID), string(blob))
+		t.Logf("resolve ok: revision=%s unchanged; content=%s", shortID(ch.ID), string(blob))
 	})
 }
 

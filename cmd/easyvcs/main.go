@@ -3,8 +3,8 @@
 // EasyVCS uses a central SQLite database (default ~/.easyvcs/easyvcs.db,
 // overridable via EASYVCS_HOME) holding all repositories. A working directory
 // is bound to a repository via a .easyvcs-workspace pointer file. Commands are
-// minimal and mirror the change-native model: committing creates a snapshot
-// under a stable change id; rebase repoints a change's parents changing only
+// minimal and mirror the revision-native model: committing creates a snapshot
+// under a stable revision id; rebase repoints a revision's parents changing only
 // the snapshot's sha.
 package main
 
@@ -45,14 +45,14 @@ Revisions:
   log [DIR]                 list revisions and their current snapshot
   show <sha> [DIR]          show a snapshot's metadata
   checkout <sha> [DIR]      set current_revision + materialize tree into dir
-  rebase <revision> [--onto <parent>]...  repoint a change onto one or more parents
-  squash <revision> [DIR]     absorb a change into its parent (parent id stable)
+  rebase <revision> [--onto <parent>]...  repoint a revision onto one or more parents
+  squash <revision> [DIR]     absorb a revision into its parent (parent id stable)
   resolve <revision> <path> [--side N]  resolve a conflict to a chosen side
-  message <revision> <text>    rewrite a change's commit message (id stable)
+  message <revision> <text>    rewrite a revision's commit message (id stable)
 
 References:
-  branch <name> <revision> [DIR]  derive a mutable branch -> independent change
-  tag <name> <revision> [DIR]       set an immutable tag -> change
+  branch <name> <revision> [DIR]  derive a mutable branch -> independent revision
+  tag <name> <revision> [DIR]       set an immutable tag -> revision
   refs [DIR]                list all branchs and tags
 
   log [--count] <path>       list revisions that modified a file (or count)
@@ -72,7 +72,7 @@ Network (own smart protocol):
   push <remote>             push changes to an EasyVCS server
 
 Git interop (no smart protocol, full + minimal-diff commit):
-  git-pull <git-url>        fetch a git repo as one local change
+  git-pull <git-url>        fetch a git repo as one local revision
   git-push <git-url>        push current revision as one git commit
 
 Flags:
@@ -239,7 +239,7 @@ func cmdWorkspace(c *ctx) {
 
 // cmdWorkspaceAttach binds the current directory to a repository. It reads (or
 // creates) a workspace marker, resolves the repo, and if the recorded current
-// change no longer exists it auto-forks a new tip change (plan A). It only
+// revision no longer exists it auto-forks a new tip revision (plan A). It only
 // runs on explicit attach, never implicitly during other commands.
 func cmdWorkspaceAttach(c *ctx) {
 	marker, err := store.LookupMarker(".")
@@ -293,7 +293,7 @@ func cmdWorkspaceAttach(c *ctx) {
 					os.Exit(1)
 				}
 			}
-			// New change on top of the repo tip (first branch or root).
+			// New revision on top of the repo tip (first branch or root).
 			parents := repoTip(repo)
 			snap, ch, err := ws.Commit(revision.CommitParams{
 				Parents:     parents,
@@ -363,8 +363,8 @@ func cmdCommit(c *ctx) {
 	dir := resolveWorkingDir()
 
 	// --new creates a fresh revision; otherwise commit AMENDS onto the current
-	// revision (the workspace's existing change), keeping revision_id stable.
-	// This matches the jj change model: edit repeatedly, "new" to split.
+	// revision (the workspace's existing revision), keeping revision_id stable.
+	// This matches the jj revision model: edit repeatedly, "new" to split.
 	isNew := false
 	for _, a := range os.Args[2:] {
 		if a == "--new" || a == "-new" {
@@ -433,7 +433,7 @@ func cmdCommit(c *ctx) {
 // now-ignored paths from all ancestor snapshots and rebases descendants to the
 // rewritten parents. It uses the workspace's current snapshot (just committed)
 // as the tip whose ancestry is rewritten.
-func applyIgnoreRewrite(c *ctx, repo *store.Repo, ws *revision.Workspace, changeID string, marker *store.WorkspaceMarker) error {
+func applyIgnoreRewrite(c *ctx, repo *store.Repo, ws *revision.Workspace, revisionID string, marker *store.WorkspaceMarker) error {
 	// Compute the matcher and a hash of ignore files at the working dir.
 	m, err := ignore.New(".")
 	if err != nil {
@@ -455,7 +455,7 @@ func applyIgnoreRewrite(c *ctx, repo *store.Repo, ws *revision.Workspace, change
 		// a targeted filter on the current commit's ancestors to be safe.
 	}
 
-	rewrote, err := ws.RewriteHistoryWithIgnores(".", m, changeID)
+	rewrote, err := ws.RewriteHistoryWithIgnores(".", m, revisionID)
 	if err != nil {
 		return err
 	}
@@ -686,7 +686,7 @@ func cmdResolve(c *ctx) {
 		fmt.Fprintln(os.Stderr, "usage: resolve <revision> <path> [--side N]")
 		os.Exit(1)
 	}
-	changeID := os.Args[2]
+	revisionID := os.Args[2]
 	path := os.Args[3]
 	side := 0
 	for i := 4; i < len(os.Args); i++ {
@@ -699,7 +699,7 @@ func cmdResolve(c *ctx) {
 		}
 	}
 	ws := revision.NewWorkspace(repo)
-	ns, ch, err := ws.Resolve(changeID, path, side)
+	ns, ch, err := ws.Resolve(revisionID, path, side)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "resolve:", err)
 		os.Exit(1)
@@ -967,7 +967,7 @@ func cmdMerge(c *ctx) {
 }
 
 // repoTip returns the parent snapshot ids for a fresh fork: the tip of the
-// first branch's change if any, otherwise no parents.
+// first branch's revision if any, otherwise no parents.
 func repoTip(repo *store.Repo) []object.ID {
 	refs, err := repo.ListRefs()
 	if err == nil && len(refs) > 0 {

@@ -12,7 +12,7 @@ import (
 )
 
 // buildRepo seeds a repo with many DISTINCT blobs committed as changes, so the
-// bundle actually collects objects (a change's snapshot references its tree).
+// bundle actually collects objects (a revision's snapshot references its tree).
 func buildRepo(tb testing.TB, n int) (*store.Repo, *store.CentralStore) {
 	tb.Helper()
 	home := tb.TempDir()

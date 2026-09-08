@@ -15,7 +15,7 @@ import (
 type bundle struct {
 	Version   int               `json:"version"`
 	Repo      store.RepoRef     `json:"repo"`
-	Changes   []*store.Revision `json:"changes"`
+	Revisions []*store.Revision `json:"changes"`
 	Snapshots []*store.Snapshot `json:"snapshots"`
 	Refs      []*store.Ref      `json:"refs"`
 	Objects   []bundleObject    `json:"objects"`
@@ -110,7 +110,7 @@ func cmdExport(c *ctx) {
 		}
 	}
 
-	b := bundle{Version: 1, Repo: repo.RepoRef(), Changes: changes, Snapshots: snaps, Refs: refs, Objects: objs}
+	b := bundle{Version: 1, Repo: repo.RepoRef(), Revisions: changes, Snapshots: snaps, Refs: refs, Objects: objs}
 	f, err := os.Create(out)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "export:", err)
@@ -127,7 +127,7 @@ func cmdExport(c *ctx) {
 		fmt.Fprintln(os.Stderr, "export:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("exported %s -> %s (%d changes, %d objects)\n", repo, out, len(changes), len(objs))
+	fmt.Printf("exported %s -> %s (%d revisions, %d objects)\n", repo, out, len(changes), len(objs))
 }
 
 func cmdImport(c *ctx) {
@@ -209,7 +209,7 @@ func cmdImport(c *ctx) {
 			os.Exit(1)
 		}
 	}
-	for _, ch := range b.Changes {
+	for _, ch := range b.Revisions {
 		if err := repo.PutRevision(ch); err != nil {
 			fmt.Fprintln(os.Stderr, "import:", err)
 			os.Exit(1)
@@ -221,7 +221,7 @@ func cmdImport(c *ctx) {
 			os.Exit(1)
 		}
 	}
-	fmt.Printf("imported %s (%d changes)\n", repoRef, len(b.Changes))
+	fmt.Printf("imported %s (%d revisions)\n", repoRef, len(b.Revisions))
 }
 
 func decodeBundleObject(ob bundleObject) (*object.Object, error) {

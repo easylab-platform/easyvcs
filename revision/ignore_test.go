@@ -74,7 +74,7 @@ func TestDropIgnoredPaths(t *testing.T) {
 }
 
 // TestRewriteHistoryWithIgnores verifies a commit chain's ancestor snapshots are
-// rewritten to drop now-ignored paths, and descendant change ids stay stable.
+// rewritten to drop now-ignored paths, and descendant revision ids stay stable.
 func TestRewriteHistoryWithIgnores(t *testing.T) {
 	runBoth(t, func(t *testing.T, ws *Workspace, dir string) {
 		// Commit 1 tracks a secret file (ignored by no rules).
@@ -96,7 +96,7 @@ func TestRewriteHistoryWithIgnores(t *testing.T) {
 		if rewrote != 2 {
 			t.Fatalf("expected 2 snapshots rewritten, got %d", rewrote)
 		}
-		// Both change ids stay stable.
+		// Both revision ids stay stable.
 		ch1b, err := ws.GetRevision(ch1.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -106,7 +106,7 @@ func TestRewriteHistoryWithIgnores(t *testing.T) {
 			t.Fatal(err)
 		}
 		if ch1b.ID != ch1.ID || ch2b.ID != ch2.ID {
-			t.Fatal("change ids must stay stable after rewrite")
+			t.Fatal("revision ids must stay stable after rewrite")
 		}
 		// The rewritten tip snapshot must not contain secret.key.
 		snap2b, _ := ws.GetSnapshot(ch2b.Hash)

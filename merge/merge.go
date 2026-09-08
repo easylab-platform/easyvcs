@@ -16,7 +16,7 @@ import (
 )
 
 // treeOps is the minimal object access needed by a merge. It is implemented by
-// change.Workspace, keeping merge independent of the storage backend.
+// revision.Workspace, keeping merge independent of the storage backend.
 type treeOps interface {
 	ReadBlob(id object.ID) ([]byte, error)
 	ReadTree(id object.ID) (*object.Tree, error)

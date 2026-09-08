@@ -67,13 +67,13 @@ func TestSnapshotMetaParentLenExceedsRemaining(t *testing.T) {
 	}
 }
 
-func TestChangeBodyRoundTrip(t *testing.T) {
+func TestRevisionBodyRoundTrip(t *testing.T) {
 	cur := object.BlobID([]byte("snapshot"))
 	// Double varint-length fork_from ("hi\x00world" has utf8). Use unicode to
 	// exercise multi-byte.
 	fork := "forked✓"
-	body := EncodeChangeBody(cur, fork)
-	gotCur, gotFork, err := DecodeChangeBody(body)
+	body := EncodeRevisionBody(cur, fork)
+	gotCur, gotFork, err := DecodeRevisionBody(body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,14 +82,14 @@ func TestChangeBodyRoundTrip(t *testing.T) {
 	}
 }
 
-func TestChangeBodyTruncated(t *testing.T) {
-	if _, _, err := DecodeChangeBody([]byte{}); err == nil {
+func TestRevisionBodyTruncated(t *testing.T) {
+	if _, _, err := DecodeRevisionBody([]byte{}); err == nil {
 		t.Fatal("expected error for empty body")
 	}
 	// 32-byte current, fork len > remaining.
 	body := make([]byte, 32)
 	body = append(body, 0x03) // fork len = 3, no bytes follow
-	if _, _, err := DecodeChangeBody(body); err == nil {
+	if _, _, err := DecodeRevisionBody(body); err == nil {
 		t.Fatal("expected error for truncated fork")
 	}
 }

@@ -28,7 +28,7 @@ var bucketMagic = []byte("EVCSBUN\x00")
 type Bundle struct {
 	Version   int               `json:"version"`
 	Repo      store.RepoRef     `json:"repo"`
-	Changes   []*store.Revision `json:"changes"`
+	Revisions []*store.Revision `json:"changes"`
 	Snapshots []*store.Snapshot `json:"snapshots"`
 	Refs      []*store.Ref      `json:"refs"`
 	Objects   []ObjectRecord    `json:"objects"`
@@ -45,7 +45,7 @@ type ObjectRecord struct {
 type binHeader struct {
 	Version   int               `json:"version"`
 	Repo      store.RepoRef     `json:"repo"`
-	Changes   []*store.Revision `json:"changes"`
+	Revisions []*store.Revision `json:"changes"`
 	Snapshots []*store.Snapshot `json:"snapshots"`
 	Refs      []*store.Ref      `json:"refs"`
 	Objects   []binObject       `json:"objects"`
@@ -65,7 +65,7 @@ type binObject struct {
 func (b *Bundle) MarshalBinary() ([]byte, error) {
 	header := binHeader{
 		Version: b.Version, Repo: b.Repo,
-		Changes: b.Changes, Snapshots: b.Snapshots, Refs: b.Refs,
+		Revisions: b.Revisions, Snapshots: b.Snapshots, Refs: b.Refs,
 	}
 	var body bytes.Buffer
 	for _, ob := range b.Objects {
@@ -124,7 +124,7 @@ func UnmarshalBinary(data []byte) (*Bundle, error) {
 	}
 	b := &Bundle{
 		Version: header.Version, Repo: header.Repo,
-		Changes: header.Changes, Snapshots: header.Snapshots, Refs: header.Refs,
+		Revisions: header.Revisions, Snapshots: header.Snapshots, Refs: header.Refs,
 	}
 	offset := 0
 	for _, od := range header.Objects {
@@ -162,7 +162,7 @@ type Collector interface {
 	Repo() *store.Repo
 }
 
-// Collect produces a Bundle containing every change, snapshot, ref, and any
+// Collect produces a Bundle containing every revision, snapshot, ref, and any
 // object referenced by those snapshots. When `have` is non-nil, objects that
 // already exist in the destination (per hasObject) are skipped; this yields a
 // delta rather than the full bundle.
@@ -179,14 +179,14 @@ func Collect(repo *store.Repo, have []string, hasObject func(id object.ID) bool)
 		return nil, err
 	}
 
-	// Track which change ids we've already collected (dedupe on rewrite).
+	// Track which revision ids we've already collected (dedupe on rewrite).
 	haveSet := map[string]bool{}
 	for _, c := range have {
 		haveSet[c] = true
 	}
 
 	b := &Bundle{Version: Version, Repo: repo.RepoRef()}
-	// Skip snapshots/changes that the destination already has (by change id).
+	// Skip snapshots/changes that the destination already has (by revision id).
 	for _, ch := range changes {
 		if haveSet[ch.ID] {
 			continue
@@ -195,7 +195,7 @@ func Collect(repo *store.Repo, have []string, hasObject func(id object.ID) bool)
 		if err != nil {
 			continue
 		}
-		b.Changes = append(b.Changes, ch)
+		b.Revisions = append(b.Revisions, ch)
 		b.Snapshots = append(b.Snapshots, snap)
 		if err := collectObjects(repo, snap.TreeID, b, hasObject); err != nil {
 			return nil, err
@@ -285,7 +285,7 @@ func Apply(repo *store.Repo, b *Bundle) (int, error) {
 			return 0, err
 		}
 	}
-	for _, ch := range b.Changes {
+	for _, ch := range b.Revisions {
 		if err := repo.PutRevision(ch); err != nil {
 			return 0, err
 		}
@@ -295,7 +295,7 @@ func Apply(repo *store.Repo, b *Bundle) (int, error) {
 			return 0, err
 		}
 	}
-	return len(b.Changes), nil
+	return len(b.Revisions), nil
 }
 
 func decodeObjectRecord(ob ObjectRecord) (*object.Object, error) {
