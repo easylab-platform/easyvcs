@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/easylab-platform/easyvcs/ignore"
 	"github.com/easylab-platform/easyvcs/object"
@@ -47,9 +48,10 @@ Revisions:
   rebase <revision> [--onto <parent>]...  repoint a change onto one or more parents
   squash <revision> [DIR]     absorb a change into its parent (parent id stable)
   resolve <revision> <path> [--side N]  resolve a conflict to a chosen side
+  message <revision> <text>    rewrite a change's commit message (id stable)
 
 References:
-  branch <name> <revision> [DIR]  set a mutable branch -> change
+  branch <name> <revision> [DIR]  derive a mutable branch -> independent change
   tag <name> <revision> [DIR]       set an immutable tag -> change
   refs [DIR]                list all branchs and tags
 
@@ -140,6 +142,8 @@ func main() {
 		cmdSquash(c)
 	case "resolve":
 		cmdResolve(c)
+	case "message":
+		cmdMessage(c)
 	case "branch":
 		cmdBranch(c)
 	case "tag":
@@ -728,16 +732,125 @@ func cmdBranch(c *ctx) {
 		fmt.Fprintln(os.Stderr, "branch:", err)
 		os.Exit(1)
 	}
-	if len(os.Args) < 4 {
-		fmt.Fprintln(os.Stderr, "usage: branch <name> <revision>")
+	args := os.Args[2:]
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: branch <name> <revision> [--message <text>] [--auto-commit]")
 		os.Exit(1)
 	}
-	r, err := revision.NewWorkspace(repo).SetRef(os.Args[2], store.RefBranch, os.Args[3])
+	name := args[0]
+	revisionArg := args[1]
+	var message string
+	autoCommit := false
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--message", "-m", "--message=":
+			if strings.HasPrefix(args[i], "--message=") {
+				message = strings.TrimPrefix(args[i], "--message=")
+			} else if i+1 < len(args) {
+				message = args[i+1]
+				i++
+			}
+		case "--auto-commit", "-auto-commit":
+			autoCommit = true
+		}
+	}
+	// Resolve the revision argument to a revision id (supports @ / id prefix /
+	// existing branch/tag name).
+	ws := revision.NewWorkspace(repo)
+	revisionID, err := resolveRevisionArg(ws, repo, revisionArg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "branch:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("branch %s -> revision %s\n", r.Name, short(r.Target))
+
+	// A branch always owns a distinct revision id so an in-place amend on one
+	// branch never mutates a revision shared by another branch. Creating a FRESH
+	// branch derives a content clone with its own id and a ForkFrom link; the
+	// source revision is left untouched. Re-running `branch` for an existing
+	// name is idempotent and keeps its already-private target. message comes
+	// from --message (or is inherited from the source); auto_commit finalizes an
+	// uncommitted fork.
+	target := revisionID
+	if cur, cerr := ws.GetRef(name); cerr == nil && cur != nil && cur.Kind == store.RefBranch {
+		// Branch already exists and owns its derived target: no-op.
+		target = cur.Target
+	} else {
+		ns, ch, err2 := ws.Derive(revisionID, message, autoCommit)
+		if err2 != nil {
+			fmt.Fprintln(os.Stderr, "branch:", err2)
+			os.Exit(1)
+		}
+		_ = ns
+		target = ch.ID
+	}
+	r, err := ws.SetRef(name, store.RefBranch, target)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "branch:", err)
+		os.Exit(1)
+	}
+	if target != revisionID {
+		fmt.Printf("branch %s -> revision %s (forked from %s)\n", r.Name, short(r.Target), short(revisionID))
+	} else {
+		fmt.Printf("branch %s -> revision %s\n", r.Name, short(r.Target))
+	}
+}
+
+func cmdMessage(c *ctx) {
+	repo, _, err := c.loadRepo()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "message:", err)
+		os.Exit(1)
+	}
+	args := os.Args[2:]
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: message <revision> <text>")
+		os.Exit(1)
+	}
+	ws := revision.NewWorkspace(repo)
+	revisionID, err := resolveRevisionArg(ws, repo, args[0])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "message:", err)
+		os.Exit(1)
+	}
+	ns, ch, err := ws.SetDescription(revisionID, args[1])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "message:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("updated message on revision %s (id unchanged) -> snapshot %s\n", short(ch.ID), short(ns.RevisionHash.String()))
+}
+
+// resolveRevisionArg resolves a user-supplied revision expression (exact id, id
+// prefix, branch/tag name, or "@") to a revision id.
+func resolveRevisionArg(ws *revision.Workspace, repo *store.Repo, arg string) (string, error) {
+	if arg == "" || arg == "@" {
+		revs, err := ws.Log()
+		if err != nil {
+			return "", err
+		}
+		if len(revs) == 0 {
+			return "", fmt.Errorf("no revisions")
+		}
+		return revs[0].ID, nil
+	}
+	if rf, err := ws.GetRef(arg); err == nil && rf != nil {
+		return rf.Target, nil
+	}
+	revs, err := ws.Log()
+	if err != nil {
+		return "", err
+	}
+	for _, rv := range revs {
+		if rv.ID == arg {
+			return rv.ID, nil
+		}
+	}
+	for _, rv := range revs {
+		if strings.HasPrefix(rv.ID, arg) {
+			return rv.ID, nil
+		}
+	}
+	return "", fmt.Errorf("unknown revision %q", arg)
 }
 
 func cmdTag(c *ctx) {
