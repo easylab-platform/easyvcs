@@ -23,16 +23,18 @@ and tags (immutable).
 ## Packages
 
 - `object` — content-addressed primitives (`blob`, `tree`, `conflict`) and ids
-- `store` — the persistence boundary (`Store` interface, `FileStore`,
-  `SqlStore`, `CentralStore`, `Repo`)
+- `store` — the persistence boundary (`RepoStore` interface over GORM;
+  switchable sqlite/postgres/mysql, plus `CentralStore`/`Repo`). Object content
+  lives in the DB (no .git object storage).
 - `revision` — the semantic layer (commit / amend / rebase / squash / merge /
   resolve / drop / revert / diff), stable-id rules live here
 - `merge` — 3-way tree merge producing first-class conflicts
 - `transfer` — serialization / bundling (codecs, deltas)
-- `mirror` — push/pull mirror scheduling
-- `encoding` — snapshot/change headers encoding
-- `ignore` — gitignore-style matching
-- `webapi` — optional HTTP/JSON API server (no connect/proto dependency)
+- `gitbridge` — experimental Git interoperability (smart protocol via go-git;
+  exports/imports revisions as Git commits, no .git storage on the easyvcs side)
+- `server` — the authoritative VCS protocol server library
+  (`server.New`/`Handler`), reusable by easylab
+- `mirror` / `encoding` / `ignore` / `webapi` — supporting layers
 
 ## CLI
 
@@ -41,10 +43,12 @@ easyvcs init [DIR]
 easyvcs commit [--new] [DIR]
 easyvcs amend [DIR]
 easyvcs log / show / diff / checkout
-easyvcs rebase <change> --onto <sha>
-easyvcs branch <name> <revision>     (bookmark)
+easyvcs rebase <revision> --onto <sha>
+easyvcs branch <name> <revision>     (bookmark; derives an independent revision)
 easyvcs tag <name> <revision>        (immutable)
 easyvcs refs / rev <expr>
+easyvcs git-pull <git-url> [branch] [--token][--ssh-key][--passphrase]
+easyvcs git-push <git-url> [branch] [--token][--ssh-key][--passphrase]
 ```
 
 ## Build
@@ -53,13 +57,6 @@ easyvcs refs / rev <expr>
 CGO_ENABLED=0 go build -o easyvcs ./cmd/easyvcs
 CGO_ENABLED=0 go build -o easyvcs-server ./cmd/server
 ```
-
-## Packages
-
-- `server` — the authoritative VCS protocol server (advertise / fetch / push,
-  bearer-token auth, non-fast-forward guard). It is a reusable library
-  (`server.New(cs, tokens)` / `Handler()`) so easylab can embed it, with a thin
-  executable wrapper in `cmd/server`.
 
 ## Module
 

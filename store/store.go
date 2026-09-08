@@ -30,6 +30,11 @@ var ErrRepoExists = errors.New("store: repository already exists")
 // ErrRepoNotFound is returned when a repository is absent.
 var ErrRepoNotFound = errors.New("store: repository not found")
 
+// ErrRevisionChanged is returned by an optimistic update (CAS) when a revision's
+// current hash no longer matches the value the caller read, meaning another
+// writer modified the revision concurrently. Callers should retry.
+var ErrRevisionChanged = errors.New("store: revision changed concurrently")
+
 // DefaultDBFile is the file name of the central database inside the home dir.
 const DefaultDBFile = "easyvcs.db"
 
@@ -152,6 +157,9 @@ type RepoStore interface {
 	// UpdateRevisionHash atomically points a revision's Hash to a new
 	// snapshot hash.
 	UpdateRevisionHash(revisionID string, hash object.ID) error
+	// UpdateRevisionHashCAS repoints a revision's Hash only if it still points
+	// at expectHash (optimistic concurrency; ErrRevisionChanged otherwise).
+	UpdateRevisionHashCAS(revisionID string, expectHash, newHash object.ID) error
 	ListRevisions() ([]*Revision, error)
 
 	// Refs.

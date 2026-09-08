@@ -558,6 +558,23 @@ func (r *Repo) UpdateRevisionHash(revisionID string, hash object.ID) error {
 	return r.PutRevision(rev)
 }
 
+// UpdateRevisionHashCAS repoints a revision's Hash to a new snapshot hash only
+// if the revision still points at `expectHash`. This is an optimistic-concurrency
+// (compare-and-swap) guard: if another writer amended the revision in between,
+// ErrRevisionChanged is returned instead of silently last-write-wins. The
+// snapshot is written only when the CAS succeeds.
+func (r *Repo) UpdateRevisionHashCAS(revisionID string, expectHash, newHash object.ID) error {
+	rev, err := r.GetRevision(revisionID)
+	if err != nil {
+		return err
+	}
+	if rev.Hash != expectHash {
+		return ErrRevisionChanged
+	}
+	rev.Hash = newHash
+	return r.PutRevision(rev)
+}
+
 // ListRevisions lists revisions scoped to this repository.
 func (r *Repo) ListRevisions() ([]*Revision, error) {
 	var rows []revisionRow

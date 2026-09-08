@@ -153,7 +153,7 @@ func doPost(url string, body []byte, token string) ([]byte, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		rb, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("server error %d: %s", resp.StatusCode, string(rb))
+		return nil, nonFastForwardOr(resp.StatusCode, rb, fmt.Errorf("server error %d: %s", resp.StatusCode, string(rb)))
 	}
 	return io.ReadAll(resp.Body)
 }
@@ -238,9 +238,26 @@ func doPostCompressed(url string, body []byte, token string) ([]byte, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		rb, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("server error %d: %s", resp.StatusCode, string(rb))
+		return nil, nonFastForwardOr(resp.StatusCode, rb, fmt.Errorf("server error %d: %s", resp.StatusCode, string(rb)))
 	}
 	return io.ReadAll(resp.Body)
+}
+
+// nonFastForwardOr inspects a non-200 response body. If the server reported a
+// non-fast-forward conflict (409 with {"error":"non-fast-forward", ...}), it
+// returns a *transfer.NonFastForwardError so callers can present a friendly
+// message; otherwise it returns the given fallback error.
+func nonFastForwardOr(code int, body []byte, fallback error) error {
+	if code == http.StatusConflict {
+		var v struct {
+			Error            string         `json:"error"`
+			ConflictingRefs  []*store.Ref   `json:"conflicting_refs"`
+		}
+		if err := json.Unmarshal(body, &v); err == nil && v.Error == "non-fast-forward" {
+			return &transfer.NonFastForwardError{ConflictingRefs: v.ConflictingRefs}
+		}
+	}
+	return fallback
 }
 
 // getBundle decodes either a binary bundle or a JSON bundle from raw bytes.

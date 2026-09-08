@@ -139,7 +139,9 @@ func (w *Workspace) Rebase(revisionID string, newParents []object.ID) (*store.Sn
 	if err := w.store.PutSnapshot(ns); err != nil {
 		return nil, nil, err
 	}
-	if err := w.store.UpdateRevisionHash(revisionID, ns.RevisionHash); err != nil {
+	// Optimistic concurrency: only repoint if the caller's snapshot is still the
+	// current one (avoids last-write-wins when two writers rewrite simultaneously).
+	if err := w.store.UpdateRevisionHashCAS(revisionID, cur.RevisionHash, ns.RevisionHash); err != nil {
 		return nil, nil, err
 	}
 	rev.Hash = ns.RevisionHash
@@ -403,7 +405,7 @@ func (w *Workspace) Resolve(revisionID string, path string, sideIndex int) (*sto
 	if err := w.store.PutSnapshot(ns); err != nil {
 		return nil, nil, err
 	}
-	if err := w.store.UpdateRevisionHash(revisionID, ns.RevisionHash); err != nil {
+	if err := w.store.UpdateRevisionHashCAS(revisionID, cur.RevisionHash, ns.RevisionHash); err != nil {
 		return nil, nil, err
 	}
 
@@ -567,7 +569,10 @@ func (w *Workspace) Squash(childRevisionID string) (*store.Snapshot, *store.Revi
 	if err := w.store.PutSnapshot(ns); err != nil {
 		return nil, nil, err
 	}
-	if err := w.store.UpdateRevisionHash(parentRev.ID, ns.RevisionHash); err != nil {
+	// Guard the parent revision against concurrent rewrites: the expected value
+	// is the parent REVISION's current hash, not the snapshot the child pointed
+	// at (the parent may have been re-written since the child was created).
+	if err := w.store.UpdateRevisionHashCAS(parentRev.ID, parentRev.Hash, ns.RevisionHash); err != nil {
 		return nil, nil, err
 	}
 	return ns, parentRev, nil
