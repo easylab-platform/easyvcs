@@ -1,0 +1,8 @@
+# binaries
+/easyvcs
+/easylab
+*.db
+*.test
+
+# go
+go.work.sum
