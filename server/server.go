@@ -3,25 +3,29 @@
 // binary (see cmd/server). It exposes the change-native smart protocol
 // (advertise / fetch / push) against the central store over HTTP:
 
-//	POST /repo/{namespace}/{name}/advertise   (read-only)
-//	POST /repo/{namespace}/{name}/fetch       (read-only)
-//	POST /repo/{namespace}/{name}/push        (auth + non-fast-forward check)
+//	POST /repo/{namespace}/{name}/advertise   (read: repo read ACL)
+//	POST /repo/{namespace}/{name}/fetch       (read: repo read ACL)
+//	POST /repo/{namespace}/{name}/push        (write: repo + branch ACL, non-fast-forward)
 //
-// By default it speaks HTTP/1.1 and cleartext HTTP/2, so the easyvcs CLI (h1+h2
-// dual-stack) and the easylab aggregator both reach it. Write endpoints require
-// a bearer token from EASYVCS_TOKEN (comma-separated); when unset, write is
-// open (like the CLI-driven easylab default).
+// Authentication uses bearer tokens resolved against the store's users/tokens
+// tables (store.LookupToken). Access is enforced per repository and, for push,
+// per branch (see store.AddBranchACL / CanPushBranch). A write operation is
+// recorded in the append-only audit_log when an AuditSink is configured.
+//
+// When no users/tokens are registered the instance is treated as open (CLI
+// default) and anonymous read/write is allowed; a configured branch allowlist
+// still applies to push.
 package server
 
 import (
 	"bytes"
 	"compress/gzip"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/easylab-platform/easyvcs/object"
 	"github.com/easylab-platform/easyvcs/store"
@@ -41,20 +45,27 @@ type AdvertiseResp struct {
 	Refs    []*store.Ref `json:"refs"`
 }
 
-// Server is the VCS protocol handler. It is scope-free; callers supply the
-// central store and an optional token set.
-type Server struct {
-	cs     *store.CentralStore
-	tokens map[string]bool
+// AuditSink receives an AuditEvent for access attempts. The default sink writes
+// to the store's append-only audit_log table; tests can supply a mock.
+type AuditSink interface {
+	Record(store.AuditEvent)
 }
 
-// New builds a Server over the given central store. tokens is a set of accepted
-// bearer tokens; an empty set means write is open (auth disabled).
-func New(cs *store.CentralStore, tokens map[string]bool) *Server {
-	if tokens == nil {
-		tokens = map[string]bool{}
+// Server is the VCS protocol handler. It resolves bearer tokens against the
+// central store on every request and enforces repository/branch ACLs.
+type Server struct {
+	cs    *store.CentralStore
+	audit AuditSink
+}
+
+// New builds a Server over the given central store. If sink is nil a default
+// store-backed sink is used (writing audit_log). The tokens parameter is gone:
+// tokens are resolved via store.LookupToken on each request.
+func New(cs *store.CentralStore, sink AuditSink) *Server {
+	if sink == nil {
+		sink = &storeAuditSink{cs: cs}
 	}
-	return &Server{cs: cs, tokens: tokens}
+	return &Server{cs: cs, audit: sink}
 }
 
 // Handler returns the HTTP router for this server. It may be mounted directly
@@ -66,41 +77,105 @@ func (s *Server) Handler() http.Handler {
 // Router returns the *http.ServeMux (same as Handler but typed).
 func (s *Server) Router() *http.ServeMux { return s.router() }
 
-func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+// storeAuditSink records AuditEvents into the store's audit_log table.
+type storeAuditSink struct{ cs *store.CentralStore }
+
+func (s *storeAuditSink) Record(ev store.AuditEvent) {
+	_ = s.cs.RecordAudit(ev)
+}
+
+// authenticate resolves the request's bearer token to a user. It returns the
+// token-level record (with UserID/Level) and true, or (nil,false) for an
+// unauthenticated request. An open instance (no registered users/tokens) allows
+// anonymous access (token=nil, ok=true via instanceIsOpen).
+func (s *Server) authenticate(r *http.Request) (*store.Token, bool) {
+	header := r.Header.Get("Authorization")
+	raw := ""
+	if strings.HasPrefix(header, "Bearer ") {
+		raw = strings.TrimPrefix(header, "Bearer ")
+	}
+	if raw == "" {
+		// No credentials: allowed only if the instance is open.
+		return nil, s.cs.IsOpenInstance()
+	}
+	tk, err := s.cs.LookupToken(raw)
+	if err != nil {
+		return nil, false
+	}
+	return tk, true
+}
+
+// userID returns a *int64 for a token, or nil for anonymous.
+func userID(tk *store.Token) *int64 {
+	if tk == nil {
+		return nil
+	}
+	return &tk.UserID
+}
+
+// requireRepoAccess guards a handler with repository read/write ACL. write=false
+// for advertise/fetch; write=true for push. It records an audit event on both
+// allow and deny.
+func (s *Server) requireRepoAccess(write bool, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.authOK(r) {
+		ns, name := r.PathValue("ns"), r.PathValue("name")
+		tk, ok := s.authenticate(r)
+		if !ok {
+			s.audit.Record(store.AuditEvent{Timestamp: time.Now().UTC().UnixMilli(), Action: actionName(r), Namespace: ns, Repo: name, UserID: nil, IP: remoteIP(r), Outcome: "denied", Detail: "bad token"})
 			writeErr(w, http.StatusUnauthorized, fmt.Errorf("unauthorized: missing or invalid token"))
 			return
+		}
+		rref := store.RepoRef{Namespace: ns, Name: name}
+		if write {
+			if !s.cs.UserCanWriteRepo(rref, userID(tk)) {
+				s.audit.Record(store.AuditEvent{Timestamp: time.Now().UTC().UnixMilli(), Action: actionName(r), Namespace: ns, Repo: name, UserID: userID(tk), IP: remoteIP(r), Outcome: "denied", Detail: "no write access"})
+				writeErr(w, http.StatusForbidden, fmt.Errorf("forbidden: no write access to %s", rref))
+				return
+			}
+			// Branch-level allowlist is enforced in handlePush once the bundle is
+			// decoded (CanPushBranch per ref).
+		} else if !s.cs.UserCanReadRepo(rref, userID(tk)) {
+			s.audit.Record(store.AuditEvent{Timestamp: time.Now().UTC().UnixMilli(), Action: actionName(r), Namespace: ns, Repo: name, UserID: userID(tk), IP: remoteIP(r), Outcome: "denied", Detail: "no read access"})
+			writeErr(w, http.StatusForbidden, fmt.Errorf("forbidden: no read access to %s", rref))
+			return
+		}
+		// Record the allowed read access (push success is recorded in handlePush).
+		if !write {
+			s.audit.Record(store.AuditEvent{Timestamp: time.Now().UTC().UnixMilli(), Action: actionName(r), Namespace: ns, Repo: name, UserID: userID(tk), IP: remoteIP(r), Outcome: "ok"})
 		}
 		next(w, r)
 	}
 }
 
-func (s *Server) authOK(r *http.Request) bool {
-	if len(s.tokens) == 0 {
-		return true // open server (CLI default)
+
+// actionName returns the protocol action for audit purposes.
+func actionName(r *http.Request) string {
+	p := r.URL.Path
+	switch {
+	case strings.HasSuffix(p, "/advertise"):
+		return "advertise"
+	case strings.HasSuffix(p, "/fetch"):
+		return "fetch"
+	case strings.HasSuffix(p, "/push"):
+		return "push"
+	default:
+		return r.Method + " " + p
 	}
-	header := r.Header.Get("Authorization")
-	if !strings.HasPrefix(header, "Bearer ") {
-		return false
+}
+
+// remoteIP returns the caller's IP (best-effort).
+func remoteIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		return strings.TrimSpace(strings.Split(xff, ",")[0])
 	}
-	token := strings.TrimPrefix(header, "Bearer ")
-	if token == "" {
-		return false
-	}
-	for valid := range s.tokens {
-		if subtle.ConstantTimeCompare([]byte(token), []byte(valid)) == 1 {
-			return true
-		}
-	}
-	return false
+	return r.RemoteAddr
 }
 
 func (s *Server) router() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /repo/{ns}/{name}/advertise", s.handleAdvertise)
-	mux.HandleFunc("POST /repo/{ns}/{name}/fetch", s.handleFetch)
-	mux.HandleFunc("POST /repo/{ns}/{name}/push", s.requireAuth(s.handlePush))
+	mux.HandleFunc("POST /repo/{ns}/{name}/advertise", s.requireRepoAccess(false, s.handleAdvertise))
+	mux.HandleFunc("POST /repo/{ns}/{name}/fetch", s.requireRepoAccess(false, s.handleFetch))
+	mux.HandleFunc("POST /repo/{ns}/{name}/push", s.requireRepoAccess(true, s.handlePush))
 	return mux
 }
 
@@ -164,6 +239,7 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
+	ns, name := r.PathValue("ns"), r.PathValue("name")
 	repo, ok := s.repo(w, r)
 	if !ok {
 		return
@@ -172,6 +248,26 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
+	}
+	// Branch-level allowlist: for each branch being pushed, the user must be
+	// allowed to push it. A user with no branch-ACL rows falls back to the repo
+	// write role (already granted by requireRepoAccess).
+	if tk, authOK := s.authenticate(r); authOK && tk != nil {
+		for _, rf := range b.Refs {
+			if rf.Kind != store.RefBranch {
+				continue
+			}
+			allowed, aerr := repo.CanPushBranch(tk.UserID, rf.Name)
+			if aerr != nil {
+				writeErr(w, http.StatusBadRequest, aerr)
+				return
+			}
+			if !allowed {
+				s.audit.Record(store.AuditEvent{Timestamp: time.Now().UTC().UnixMilli(), Action: "push", Namespace: ns, Repo: name, UserID: &tk.UserID, IP: remoteIP(r), Outcome: "denied", Detail: "branch " + rf.Name + " not in allowlist"})
+				writeErr(w, http.StatusForbidden, fmt.Errorf("forbidden: branch %s not allowed for this user", rf.Name))
+				return
+			}
+		}
 	}
 	// Reject a non-fast-forward update: compare the server's current refs to
 	// the incoming bundle's refs. The authoritative check is server-side against
@@ -195,6 +291,10 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
+	}
+	// Audit the successful write.
+	if tk, authOK := s.authenticate(r); authOK {
+		s.audit.Record(store.AuditEvent{Timestamp: time.Now().UTC().UnixMilli(), Action: "push", Namespace: ns, Repo: name, UserID: userID(tk), IP: remoteIP(r), Outcome: "ok", Detail: fmt.Sprintf("applied=%d", n)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"applied": n, "repo": repo.String()})
 }

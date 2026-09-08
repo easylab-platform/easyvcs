@@ -711,7 +711,11 @@ type Remote struct {
 // PutRemote registers or updates a remote for this repository. An empty token
 // clears the stored token.
 func (r *Repo) PutRemote(name, url, token string) error {
-	row := &remoteRow{RepoID: r.repoID, Name: name, URL: url, Token: nullable(token)}
+	enc, err := encryptSecret(token)
+	if err != nil {
+		return err
+	}
+	row := &remoteRow{RepoID: r.repoID, Name: name, URL: url, Token: nullable(enc)}
 	return r.cs.d.gdb.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "repo_id"}, {Name: "name"}},
 		UpdateAll: true,
@@ -810,7 +814,11 @@ func (r *Repo) GetRemote(name string) (*Remote, error) {
 	}
 	token := ""
 	if row.Token != nil {
-		token = *row.Token
+		dec, derr := decryptSecret(*row.Token)
+		if derr != nil {
+			return nil, derr
+		}
+		token = dec
 	}
 	return &Remote{Name: name, URL: row.URL, Token: token}, nil
 }

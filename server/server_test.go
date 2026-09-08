@@ -24,11 +24,24 @@ func newTestServer(t *testing.T, token string) *Server {
 	if err := cs.SetWAL(); err != nil {
 		t.Fatal(err)
 	}
-	tokens := map[string]bool{}
+	s := New(cs, nil)
+	// When a token is requested, register a user + the token so authenticate()
+	// can resolve it, and grant the user write access to the "team" namespace so
+	// pushes to team/* are authorized. Otherwise the store has no users => open
+	// instance (anonymous read/write).
 	if token != "" {
-		tokens[token] = true
+		u, err := cs.CreateUser("tester", "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cs.CreateToken(token, u.ID, "write"); err != nil {
+			t.Fatal(err)
+		}
+		if err := cs.AddNamespaceMember("team", u.ID, "member"); err != nil {
+			t.Fatal(err)
+		}
 	}
-	return New(cs, tokens)
+	return s
 }
 
 func seedRepo(t *testing.T, s *Server) {
@@ -247,5 +260,65 @@ func TestEndToEndMockPushFetch(t *testing.T) {
 	}
 	if len(fb.Revisions) == 0 || len(fb.Refs) == 0 {
 		t.Fatalf("fetch bundle empty: %+v", fb)
+	}
+}
+
+// mockSink records audit events for assertions.
+type mockSink struct{ events []store.AuditEvent }
+
+func (m *mockSink) Record(ev store.AuditEvent) { m.events = append(m.events, ev) }
+
+func TestACLDeniesNonMemberWrite(t *testing.T) {
+	s := newTestServer(t, "secret")
+	seedRepo(t, s)
+	repo, _ := s.cs.OpenRepo(store.RepoRef{Namespace: "team", Name: "app"})
+	revs, _ := repo.ListRevisions()
+	mainRef, _ := repo.GetRef("main")
+
+	// "secret" user IS a "team" member (from newTestServer), so this is allowed.
+	b := &transfer.Bundle{Version: transfer.Version, Repo: repo.RepoRef(),
+		Revisions: revs, Refs: []*store.Ref{{Name: "main", Kind: store.RefBranch, Target: mainRef.Target}}}
+	payload, _ := transfer.CompressBundle(b)
+	req := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(payload))
+	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	s.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("member push should be allowed: %d", rec.Code)
+	}
+
+	// A user with a token but NOT a team member -> repo-level write denied (403).
+	// Create a second user + token in a different namespace.
+	u2, _ := s.cs.CreateUser("outsider", "x")
+	_, _ = s.cs.CreateToken("secret-out", u2.ID, "write")
+	req2 := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(payload))
+	req2.Header.Set("Content-Encoding", "gzip")
+	req2.Header.Set("Authorization", "Bearer secret-out")
+	rec2 := httptest.NewRecorder()
+	s.Router().ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusForbidden {
+		t.Fatalf("non-member push should be 403, got %d %s", rec2.Code, rec2.Body.String())
+	}
+}
+
+func TestAuditSinkRecordsDenied(t *testing.T) {
+	// Open instance (no users) -> anonymous allowed. Use a mock sink and assert
+	// at least an 'advertise' ok event is recorded.
+	home := t.TempDir()
+	t.Setenv("EASYVCS_HOME", home)
+	cs, _ := store.OpenDefault()
+	_ = cs.SetWAL()
+	s := New(cs, &mockSink{})
+	seedRepo(t, s)
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/repo/team/app/advertise", bytes.NewReader([]byte(`{}`)))
+	s.Router().ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("open advertise %d", rec.Code)
+	}
+	m := s.audit.(*mockSink)
+	if len(m.events) == 0 {
+		t.Fatal("no audit event recorded")
 	}
 }

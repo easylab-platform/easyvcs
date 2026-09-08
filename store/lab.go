@@ -296,6 +296,24 @@ func (s *CentralStore) instanceIsOpen() bool {
 	return len(users) == 0
 }
 
+// IsOpenInstance is the exported form of instanceIsOpen for callers outside the
+// store package (e.g. easyvcs-server). It reports whether the instance has no
+// registered users, in which case anonymous access is allowed (CLI default).
+func (s *CentralStore) IsOpenInstance() bool { return s.instanceIsOpen() }
+
+// UserCanWriteRepo reports whether a user may write to a repository (push).
+// Write access requires the instance to be open OR the user to be a namespace
+// member. A nil userID is only allowed when the instance is open.
+func (s *CentralStore) UserCanWriteRepo(r RepoRef, userID *int64) bool {
+	if s.instanceIsOpen() {
+		return true
+	}
+	if userID == nil {
+		return false
+	}
+	return s.IsNamespaceMember(r.Namespace, *userID)
+}
+
 // RepoMeta returns the hosting metadata for a repository.
 func (r *Repo) RepoMeta() (RepoMeta, error) {
 	var row repoRow
@@ -305,11 +323,15 @@ func (r *Repo) RepoMeta() (RepoMeta, error) {
 		}
 		return RepoMeta{}, err
 	}
+	decToken, err := decryptSecret(row.MirrorToken)
+	if err != nil {
+		return RepoMeta{}, err
+	}
 	return RepoMeta{
 		Description: row.Description, Visibility: row.Visibility, DefaultBranch: row.DefaultBranch,
 		Kind: row.Kind, MirrorURL: row.MirrorURL, MirrorBranch: row.MirrorBranch,
 		MirrorInterval: int(row.MirrorInterval), MirrorLastRev: row.MirrorLastRev,
-		MirrorLastSync: row.MirrorLastSync, MirrorLastErr: row.MirrorLastErr, MirrorToken: row.MirrorToken,
+		MirrorLastSync: row.MirrorLastSync, MirrorLastErr: row.MirrorLastErr, MirrorToken: decToken,
 	}, nil
 }
 
@@ -322,11 +344,15 @@ func (r *Repo) UpdateRepoMeta(m RepoMeta) error {
 
 // UpdateMirrorMeta records mirror state (url, branch, interval, last result).
 func (r *Repo) UpdateMirrorMeta(m RepoMeta) error {
+	enc, err := encryptSecret(m.MirrorToken)
+	if err != nil {
+		return err
+	}
 	return r.cs.d.gdb.Model(&repoRow{}).Where("id=?", r.repoID).Updates(map[string]any{
 		"kind": m.Kind, "mirror_url": m.MirrorURL, "mirror_branch": m.MirrorBranch,
 		"mirror_interval": m.MirrorInterval, "mirror_last_rev": m.MirrorLastRev,
 		"mirror_last_sync": m.MirrorLastSync, "mirror_last_error": m.MirrorLastErr,
-		"mirror_token": m.MirrorToken,
+		"mirror_token": enc,
 	}).Error
 }
 

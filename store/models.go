@@ -186,6 +186,33 @@ type gitRevisionLinkRow struct {
 
 func (gitRevisionLinkRow) TableName() string { return "git_revision_links" }
 
+// branchACLRow grants a user push access to a specific branch of a repository.
+// Its existence is the branch-level allowlist: a user with a row can push that
+// branch; a user with NO rows for a repo falls back to the repo's write role.
+type branchACLRow struct {
+	RepoID int64  `gorm:"primaryKey;not null"`
+	UserID int64  `gorm:"primaryKey;not null"`
+	Branch string `gorm:"primaryKey;not null"`
+}
+
+func (branchACLRow) TableName() string { return "branch_acl" }
+
+// auditLogRow is an append-only access/audit record. It is never updated or
+// deleted (no undo / reflog semantics).
+type auditLogRow struct {
+	ID        int64  `gorm:"primaryKey;autoIncrement"`
+	Timestamp int64  `gorm:"not null;index"`
+	Action    string `gorm:"not null"`
+	Namespace string `gorm:"not null;default:''"`
+	Repo      string `gorm:"not null;default:''"`
+	UserID    *int64
+	IP        string `gorm:"not null;default:''"`
+	Outcome   string `gorm:"not null;default:''"`
+	Detail    string `gorm:"not null;default:''"`
+}
+
+func (auditLogRow) TableName() string { return "audit_log" }
+
 // allModels returns every table model for AutoMigrate.
 func allModels() []any {
 	return []any{
@@ -193,8 +220,20 @@ func allModels() []any {
 		&refRow{}, &workspaceRow{}, &remoteRow{}, &remoteRefRow{},
 		&userRow{}, &tokenRow{}, &namespaceMemberRow{},
 		&mergeRequestRow{}, &mrReviewRow{}, &mrCommentRow{},
-		&gitRevisionLinkRow{},
+		&gitRevisionLinkRow{}, &branchACLRow{}, &auditLogRow{},
 	}
+}
+
+// AuditEvent is a plain append-only record of an access attempt.
+type AuditEvent struct {
+	Timestamp int64
+	Action    string // "advertise" | "fetch" | "push"
+	Namespace string
+	Repo      string
+	UserID    *int64
+	IP        string
+	Outcome   string // "ok" | "denied" | "error"
+	Detail    string
 }
 
 // changedPathsJSON encodes a []string as a JSON byte blob (legacy column).
