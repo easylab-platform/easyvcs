@@ -137,7 +137,7 @@ type namespaceMemberRow struct {
 type mergeRequestRow struct {
 	ID          int64  `gorm:"primaryKey;autoIncrement"`
 	RepoID      int64  `gorm:"not null;uniqueIndex:idx_mr"`
-	IID         int64  `gorm:"not null;uniqueIndex:idx_mr"`
+	IID         int64  `gorm:"column:iid;not null;uniqueIndex:idx_mr"`
 	Title       string `gorm:"not null"`
 	Description string `gorm:"not null;default:''"`
 	Source      string `gorm:"not null"`
