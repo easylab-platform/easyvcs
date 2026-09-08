@@ -72,11 +72,6 @@ func TestE2E_MultiParentRebaseConflictResolve(t *testing.T) {
 	})
 }
 
-func baseSnapID(ch *store.Revision, ws *Workspace) object.ID {
-	snap, _ := ws.GetSnapshot(ch.Hash)
-	return snap.RevisionHash
-}
-
 // TestResolvePropagatesToDescendants verifies that resolving a conflict in a
 // parent change automatically rewrites descendant changes that carry the same
 // conflict, while keeping their revision ids stable.

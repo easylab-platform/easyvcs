@@ -2,7 +2,6 @@ package store
 
 import (
 	"encoding/json"
-	"time"
 )
 
 // GORM models mirror the central store schema. They are used by AutoMigrate to
@@ -150,8 +149,8 @@ type mergeRequestRow struct {
 
 // mr_reviews table.
 type mrReviewRow struct {
-	ID         int64  `gorm:"primaryKey;autoIncrement"`
-	MRID       int64  `gorm:"not null;index"`
+	ID         int64 `gorm:"primaryKey;autoIncrement"`
+	MRID       int64 `gorm:"not null;index"`
 	ReviewerID *int64
 	State      string `gorm:"not null"`
 	Body       string `gorm:"not null;default:''"`
@@ -160,8 +159,8 @@ type mrReviewRow struct {
 
 // mr_comments table.
 type mrCommentRow struct {
-	ID       int64  `gorm:"primaryKey;autoIncrement"`
-	MRID     int64  `gorm:"not null;index"`
+	ID       int64 `gorm:"primaryKey;autoIncrement"`
+	MRID     int64 `gorm:"not null;index"`
 	AuthorID *int64
 	Body     string `gorm:"not null"`
 	Path     *string
@@ -236,18 +235,6 @@ type AuditEvent struct {
 	Detail    string
 }
 
-// changedPathsJSON encodes a []string as a JSON byte blob (legacy column).
-func changedPathsJSON(paths []string) []byte {
-	if paths == nil {
-		return nil
-	}
-	b, err := json.Marshal(paths)
-	if err != nil {
-		return nil
-	}
-	return b
-}
-
 // decodeChangedPathsJSON decodes the changed_paths blob.
 func decodeChangedPathsJSON(raw []byte) []string {
 	if raw == nil {
@@ -260,24 +247,21 @@ func decodeChangedPathsJSON(raw []byte) []string {
 	return out
 }
 
-// unixMillis returns ms; used to keep time columns portable integers.
-func unixMillis(t time.Time) int64 { return t.UnixMilli() }
-
 // TableName methods pin GORM to the original canonical table names so any
 // remaining raw-SQL callers (mirror.go/workspace.go) and the GORM layer agree.
 
-func (repoRow) TableName() string         { return "repositories" }
-func (pushMirrorRow) TableName() string   { return "push_mirrors" }
-func (objectRow) TableName() string       { return "objects" }
-func (snapshotRow) TableName() string     { return "snapshots" }
-func (revisionRow) TableName() string     { return "revisions" }
-func (refRow) TableName() string          { return "refs" }
-func (workspaceRow) TableName() string    { return "workspaces" }
-func (remoteRow) TableName() string       { return "remotes" }
-func (remoteRefRow) TableName() string    { return "remote_refs" }
-func (userRow) TableName() string         { return "users" }
-func (tokenRow) TableName() string        { return "tokens" }
+func (repoRow) TableName() string            { return "repositories" }
+func (pushMirrorRow) TableName() string      { return "push_mirrors" }
+func (objectRow) TableName() string          { return "objects" }
+func (snapshotRow) TableName() string        { return "snapshots" }
+func (revisionRow) TableName() string        { return "revisions" }
+func (refRow) TableName() string             { return "refs" }
+func (workspaceRow) TableName() string       { return "workspaces" }
+func (remoteRow) TableName() string          { return "remotes" }
+func (remoteRefRow) TableName() string       { return "remote_refs" }
+func (userRow) TableName() string            { return "users" }
+func (tokenRow) TableName() string           { return "tokens" }
 func (namespaceMemberRow) TableName() string { return "namespace_members" }
-func (mergeRequestRow) TableName() string { return "merge_requests" }
-func (mrReviewRow) TableName() string     { return "mr_reviews" }
-func (mrCommentRow) TableName() string    { return "mr_comments" }
+func (mergeRequestRow) TableName() string    { return "merge_requests" }
+func (mrReviewRow) TableName() string        { return "mr_reviews" }
+func (mrCommentRow) TableName() string       { return "mr_comments" }

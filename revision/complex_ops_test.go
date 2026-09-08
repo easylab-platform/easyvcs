@@ -435,14 +435,5 @@ func TestRebaseManyJumpsOverChain(t *testing.T) {
 	})
 }
 
-func containsStr(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}
-
 var _ = filepath.Join
 var _ = os.Getenv

@@ -110,3 +110,34 @@ func TestAuditRecord(t *testing.T) {
 		t.Fatalf("expected newest-first distinct outcomes")
 	}
 }
+
+// TestTokenStoredHashedRaw verifies the tokens table never holds the plaintext
+// (internal access to the GORM session; no exported test backdoor needed).
+func TestTokenStoredHashedRaw(t *testing.T) {
+	cs := newTestCentral(t)
+	u, err := cs.CreateUser("alice", "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.CreateToken("supersecret", u.ID, "write"); err != nil {
+		t.Fatal(err)
+	}
+	var raw string
+	if err := cs.d.gdb.Raw("SELECT token FROM tokens LIMIT 1").Scan(&raw).Error; err != nil {
+		t.Fatal(err)
+	}
+	if raw == "supersecret" {
+		t.Fatal("token stored in plaintext")
+	}
+	if len(raw) != 64 { // sha256 hex
+		t.Fatalf("token hash length = %d, want 64", len(raw))
+	}
+	if tk, err := cs.LookupToken("supersecret"); err != nil || tk.UserID != u.ID {
+		t.Fatalf("lookup by plaintext: %v %v", tk, err)
+	}
+	// ListTokens must not echo the plaintext.
+	toks, err := cs.ListTokens(u.ID)
+	if err != nil || len(toks) != 1 || toks[0].Token != "" {
+		t.Fatalf("ListTokens must omit plaintext: %+v %v", toks, err)
+	}
+}

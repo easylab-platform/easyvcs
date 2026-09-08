@@ -432,4 +432,3 @@ func TestMarkerWriteAndReadRoundTrip(t *testing.T) {
 		t.Fatalf("repo mismatch: %+v", got.Repo)
 	}
 }
-

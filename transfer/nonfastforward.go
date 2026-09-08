@@ -29,7 +29,8 @@ func (e *NonFastForwardError) Error() string {
 }
 
 // IsAncestor reports whether revision `a` is an ancestor of (or equal to)
-// revision `b` by walking the first-parent chain in the given repo. It is the
+// revision `b` by walking the snapshot graph in the given repo (all parent
+// edges, breadth-first). It is the
 // store-level building block for fast-forward checks and does not depend on a
 // workspace. This lets both the client (pre-check) and a server (authoritative
 // check) use the same logic with no network.
@@ -49,7 +50,7 @@ func IsAncestor(repo *store.Repo, a string, b string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	// BFS from b's snapshot across first-parent edges, checking membership of a.
+	// BFS from b's snapshot across parent edges, checking membership of a.
 	seen := map[string]bool{bRev.Hash.String(): true}
 	queue := []object.ID{bSnap.RevisionHash}
 	aHash, err := hashForRevision(repo, a)
@@ -76,24 +77,33 @@ func IsAncestor(repo *store.Repo, a string, b string) (bool, error) {
 	return false, nil
 }
 
-// hashForRevision resolves a revision id (or prefix) to its current snapshot
-// hash within a repo.
+// hashForRevision resolves a revision id (or a unique id prefix) to its current
+// snapshot hash within a repo. A prefix matching more than one revision is an
+// error (ambiguous), never a silent first match.
 func hashForRevision(repo *store.Repo, idOrPrefix string) (object.ID, error) {
 	rev, err := repo.GetRevision(idOrPrefix)
 	if err == nil {
 		return rev.Hash, nil
 	}
-	// Fall back to prefix match.
+	// Fall back to prefix match; require uniqueness.
 	revs, lerr := repo.ListRevisions()
 	if lerr != nil {
 		return object.ID{}, lerr
 	}
-	for _, r := range revs {
+	var match *store.Revision
+	for i := range revs {
+		r := revs[i]
 		if len(idOrPrefix) <= len(r.ID) && r.ID[:len(idOrPrefix)] == idOrPrefix {
-			return r.Hash, nil
+			if match != nil {
+				return object.ID{}, fmt.Errorf("ambiguous revision prefix %q (matches at least %s and %s)", idOrPrefix, match.ID, r.ID)
+			}
+			match = r
 		}
 	}
-	return object.ID{}, fmt.Errorf("unknown revision %q", idOrPrefix)
+	if match == nil {
+		return object.ID{}, fmt.Errorf("unknown revision %q", idOrPrefix)
+	}
+	return match.Hash, nil
 }
 
 // CheckNonFastForward compares the refs the client expects on the server

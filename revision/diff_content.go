@@ -215,7 +215,7 @@ func buildHunks(oldLines, newLines []string, ops []editOp) []DiffHunk {
 		}
 		var lines []DiffLine
 		oldCount, newCount := 0, 0
-		var oldStart, newStart int = -1, -1
+		oldStart, newStart := -1, -1
 		for i := lo; i <= hi; i++ {
 			p := pos[i]
 			switch p.op.kind {
@@ -312,9 +312,10 @@ func (w *Workspace) DiffContentFromChanges(changes []FileChange) ([]FileDiff, er
 				fd.Content = RenderUnified(fc.Path, fc.Path, hunks)
 				for _, h := range hunks {
 					for _, ln := range h.Lines {
-						if ln.Kind == "add" {
+						switch ln.Kind {
+						case "add":
 							fd.AddedLines++
-						} else if ln.Kind == "del" {
+						case "del":
 							fd.RemovedLines++
 						}
 					}

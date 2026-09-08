@@ -44,7 +44,7 @@ func timeNow() time.Time { return time.Now() }
 
 func TestMarshalUnmarshalBinary(t *testing.T) {
 	repo, cs := seedTransferRepo(t)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	b, err := CollectAll(repo)
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +78,7 @@ func TestMarshalUnmarshalBinary(t *testing.T) {
 
 func TestUnmarshalGzipFrame(t *testing.T) {
 	repo, cs := seedTransferRepo(t)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	b, _ := CollectAll(repo)
 	compressed, err := CompressBundle(b)
 	if err != nil {
@@ -113,14 +113,14 @@ func TestUnmarshalNonBinary(t *testing.T) {
 
 func TestCollectApplyRoundTrip(t *testing.T) {
 	repoA, csA := seedTransferRepo(t)
-	defer csA.Close()
+	defer func() { _ = csA.Close() }()
 	b, _ := CollectAll(repoA)
 	// Apply into a fresh repoB in the same central store.
 	csB, err := store.Open(t.TempDir() + "/db.sqlite")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer csB.Close()
+	defer func() { _ = csB.Close() }()
 	repoB, _ := csB.Create(store.RepoRef{Namespace: "n", Name: "rB"})
 	n, err := Apply(repoB, b)
 	if err != nil {
@@ -141,7 +141,7 @@ func TestCollectApplyRoundTrip(t *testing.T) {
 
 func TestCollectDeltaSkipsKnownObjects(t *testing.T) {
 	repo, cs := seedTransferRepo(t)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	haveIDs, _ := EnumerateObjectIDs(repo)
 	have := map[string]bool{}
 	for _, id := range haveIDs {
@@ -167,7 +167,7 @@ func TestCollectDeltaSkipsKnownObjects(t *testing.T) {
 
 func TestCollectObjectsWhere(t *testing.T) {
 	repo, cs := seedTransferRepo(t)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	// Collect objects reachable from the tree root of the first revision.
 	changes, _ := repo.ListRevisions()
 	snap, err := repo.GetSnapshot(changes[0].Hash)
@@ -185,7 +185,7 @@ func TestCollectObjectsWhere(t *testing.T) {
 
 func TestGzipSize(t *testing.T) {
 	repo, cs := seedTransferRepo(t)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	b, _ := CollectAll(repo)
 	plain, _ := b.MarshalBinary()
 	var buf bytes.Buffer

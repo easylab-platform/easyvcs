@@ -21,7 +21,7 @@ func TestBackendPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	roundTrip(t, cs)
 }
 
@@ -35,7 +35,7 @@ func TestBackendMySQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	roundTrip(t, cs)
 }
 

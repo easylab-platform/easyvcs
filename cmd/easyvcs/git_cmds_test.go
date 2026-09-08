@@ -15,7 +15,7 @@ func TestParseGitArgs(t *testing.T) {
 
 	// URL only (default branch).
 	setArg("https://github.com/o/r.git")
-	u, b, tk, sk, p, _ = parseGitArgs("git-push", true)
+	u, b, tk, _, _, _ = parseGitArgs("git-push", true)
 	if u != "https://github.com/o/r.git" || b != "main" || tk != "" {
 		t.Fatalf("default: got (%q,%q,%q)", u, b, tk)
 	}

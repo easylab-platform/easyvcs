@@ -37,16 +37,6 @@ type ConflictAtom struct {
 // absent is a sentinel id representing "no content / deleted".
 var absent object.ID
 
-// mergeTerms is the working set of participating entries for one path.
-type mergeTerms struct {
-	// hasBase indicates whether a common ancestor existed at this path.
-	hasBase bool
-	base    object.ID
-	// ours/theirs presence flags.
-	hasOurs, hasTheirs bool
-	ours, theirs       object.ID
-}
-
 // Trees performs a recursive 3-way tree merge. It returns the merged tree
 // (with conflict objects embedded at conflicting paths) and the list of
 // conflict atoms that were produced. A persistence failure while writing a

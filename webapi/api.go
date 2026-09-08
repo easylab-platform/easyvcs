@@ -295,9 +295,12 @@ func (a *API) imageBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var out map[string]any
-	// The build id response is best-effort to parse; if it is not JSON we
-	// forward an empty body rather than failing the proxy call.
-	_ = json.Unmarshal(b, &out)
+	// The build already succeeded (200); a body that fails to parse is
+	// forwarded as an empty object rather than failing the proxy call, but the
+	// parse error is surfaced for diagnostics.
+	if jerr := json.Unmarshal(b, &out); jerr != nil {
+		out = map[string]any{"warning": "build response was not JSON", "raw": string(b)}
+	}
 	writeJSON(w, out)
 }
 
@@ -315,7 +318,7 @@ func (a *API) buildStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	for k, vs := range resp.Header {
 		for _, v := range vs {
 			w.Header().Add(k, v)
@@ -336,7 +339,11 @@ func (a *API) packages(w http.ResponseWriter, r *http.Request) {
 		repos = rr
 	}
 	var rels []map[string]any
-	all, _ := a.CS.List()
+	all, err := a.CS.List()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 	for _, rr := range all {
 		lst, err := a.upstreamClient().releases(ctx, rr.Namespace, rr.Name)
 		if err != nil {
@@ -412,20 +419,15 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 func writeErr(w http.ResponseWriter, err error) {
-	if err == errBadRequest || err == errNotFound {
+	switch err {
+	case errBadRequest:
 		w.WriteHeader(http.StatusBadRequest)
-	} else if err == errNotFound {
+	case errNotFound:
 		w.WriteHeader(http.StatusNotFound)
-	} else {
+	default:
 		w.WriteHeader(http.StatusInternalServerError)
 	}
 	writeJSON(w, map[string]string{"error": err.Error()})
-}
-
-// proxy returns an HTTP handler that reverse-proxies r to the target URL,
-// preserving method + body and streaming the response (for SSE).
-func (a *API) proxyTarget(w http.ResponseWriter, r *http.Request, target string) {
-	a.proxy(w, r, target)
 }
 
 func (a *API) proxy(w http.ResponseWriter, r *http.Request, target string) {
@@ -442,7 +444,7 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request, target string) {
 		writeErr(w, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	for k, vs := range resp.Header {
 		for _, v := range vs {
 			w.Header().Add(k, v)
@@ -471,4 +473,3 @@ func writeStream(w http.ResponseWriter, resp *http.Response) error {
 		}
 	}
 }
-

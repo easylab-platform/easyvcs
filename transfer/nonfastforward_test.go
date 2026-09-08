@@ -18,7 +18,7 @@ func TestIsAncestorAndCheckNonFastForward(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = cs.SetWAL()
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	repo, err := cs.Create(store.RepoRef{Namespace: "n", Name: "r"})
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +92,37 @@ func revRefs(t *testing.T, repo *store.Repo, pairs [][2]string) []*store.Ref {
 	return out
 }
 
-
-
 func now() time.Time { return time.Now().UTC() }
+
+// TestHashForRevisionAmbiguousPrefix verifies a short prefix matching multiple
+// revisions is an error, not a silent first match.
+func TestHashForRevisionAmbiguousPrefix(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("EASYVCS_HOME", home)
+	cs, err := store.OpenDefault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	repo, err := cs.Create(store.RepoRef{Namespace: "n", Name: "r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h1, _ := object.HexToID("11")
+	h2, _ := object.HexToID("22")
+	if err := repo.PutRevision(&store.Revision{ID: "abc100", Hash: h1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.PutRevision(&store.Revision{ID: "abc200", Hash: h2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hashForRevision(repo, "abc"); err == nil {
+		t.Fatal("ambiguous prefix should error")
+	}
+	if h, err := hashForRevision(repo, "abc100"); err != nil || h != h1 {
+		t.Fatalf("exact id should resolve: %v %v", h, err)
+	}
+	if h, err := hashForRevision(repo, "abc1"); err != nil || h != h1 {
+		t.Fatalf("unique prefix should resolve: %v %v", h, err)
+	}
+}

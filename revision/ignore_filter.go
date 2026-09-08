@@ -3,7 +3,6 @@ package revision
 import (
 	"github.com/easylab-platform/easyvcs/ignore"
 	"github.com/easylab-platform/easyvcs/object"
-	"github.com/easylab-platform/easyvcs/store"
 )
 
 // DropIgnoredPathsFromTree removes every path in a tree that is matched by the
@@ -65,5 +64,3 @@ func HasIgnoresCompiled(m *ignore.Matcher) bool { return m != nil }
 func (w *Workspace) RebuildTreeFiltered(root string, m *ignore.Matcher, treeID object.ID) (object.ID, error) {
 	return w.DropIgnoredPathsFromTree(root, m, treeID)
 }
-
-var _ = store.ErrNotFound

@@ -52,7 +52,10 @@ type Path = string
 // .vcsignore patterns (relative to the walk root) are excluded. The .easyvcs
 // metadata dir and the workspace marker file are always skipped.
 func (w *Workspace) buildTreeFromFS(dir string) (object.ID, error) {
-	m, _ := ignore.New(dir)
+	m, err := ignore.New(dir)
+	if err != nil {
+		return object.ID{}, fmt.Errorf("load ignore rules: %w", err)
+	}
 	return w.buildTreeFromFSFiltered(dir, m)
 }
 
@@ -268,7 +271,6 @@ func (w *Workspace) GetRevision(id string) (*store.Revision, error) {
 	}
 	return c, err
 }
-
 
 // ParentsOfRevision returns the parent snapshot ids of a revision's current
 // snapshot. If the revision or snapshot is missing, it returns an empty slice.

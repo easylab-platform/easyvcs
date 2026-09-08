@@ -80,4 +80,3 @@ func (s *CentralStore) ListAudit(limit int) ([]AuditEvent, error) {
 	}
 	return out, nil
 }
-

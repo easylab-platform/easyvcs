@@ -21,7 +21,7 @@ func TestIsLocalURL(t *testing.T) {
 		{"bare-path", false},
 		{"http://host:18160", false},
 		{"https://host/repo", false},
-		{"host:18160", false},        // has a colon but no scheme; treated as a host:port network target
+		{"host:18160", false}, // has a colon but no scheme; treated as a host:port network target
 		{"git@host:path", false},
 	}
 	for _, c := range cases {

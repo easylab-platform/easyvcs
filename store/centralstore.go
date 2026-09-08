@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-
 	"github.com/easylab-platform/easyvcs/encoding"
 	"github.com/easylab-platform/easyvcs/object"
 	"gorm.io/gorm"
@@ -30,8 +29,6 @@ type CentralStore struct {
 	openKnown bool
 	openValue bool
 }
-
-
 
 // HomeDir returns the EasyVCS home directory (default ~/.easyvcs, overridable
 // via EASYVCS_HOME).
@@ -351,7 +348,7 @@ func (s *CentralStore) Fork(src RepoRef, dst RepoRef) (*Repo, error) {
 			Hash:         newHash,
 			Created:      time.UnixMilli(r.created),
 			ForkFrom:     r.forkFrom.String,
-			ChangedPaths: decodeChanged(r.changed),
+			ChangedPaths: decodeChangedPathsJSON(r.changed),
 		}); err != nil {
 			return nil, err
 		}
@@ -377,17 +374,6 @@ func (s *CentralStore) Fork(src RepoRef, dst RepoRef) (*Repo, error) {
 func mustHexID(s string) object.ID {
 	id, _ := object.HexToID(s)
 	return id
-}
-
-func decodeChanged(raw []byte) []string {
-	if raw == nil {
-		return nil
-	}
-	out := []string{}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil
-	}
-	return out
 }
 
 // RepoID returns the numeric repo id used internally.
@@ -610,15 +596,24 @@ func (r *Repo) GetRevision(id string) (*Revision, error) {
 	if err != nil {
 		return nil, err
 	}
-	return r.fromRevisionRow(&row), nil
+	rev, err := r.fromRevisionRow(&row)
+	if err != nil {
+		return nil, err
+	}
+	return rev, nil
 }
 
-func (r *Repo) fromRevisionRow(row *revisionRow) *Revision {
-	cur, _ := object.HexToID(row.Hash)
+func (r *Repo) fromRevisionRow(row *revisionRow) (*Revision, error) {
+	cur, err := object.HexToID(row.Hash)
+	if err != nil {
+		// A corrupt hash would silently become a zero id and poison ancestry
+		// checks downstream; surface it instead.
+		return nil, fmt.Errorf("revision %s: corrupt hash %q: %w", row.ID, row.Hash, err)
+	}
 	return &Revision{
 		ID: row.ID, Hash: cur, Created: time.UnixMilli(row.Created),
 		ForkFrom: row.ForkFrom, ChangedPaths: decodeChangedPathsJSON(row.ChangedPath),
-	}
+	}, nil
 }
 
 // UpdateRevisionHash atomically repoints a revision's Hash field. It preserves
@@ -657,7 +652,11 @@ func (r *Repo) ListRevisions() ([]*Revision, error) {
 	}
 	out := make([]*Revision, 0, len(rows))
 	for i := range rows {
-		out = append(out, r.fromRevisionRow(&rows[i]))
+		rev, err := r.fromRevisionRow(&rows[i])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rev)
 	}
 	return out, nil
 }
@@ -883,4 +882,3 @@ func (s *CentralStore) QueryCount(count *int) error {
 	*count = int(c)
 	return nil
 }
-

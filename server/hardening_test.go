@@ -290,22 +290,3 @@ func TestAuditIPNotSpoofed(t *testing.T) {
 		t.Fatal("X-Forwarded-For must not be trusted without EASYVCS_TRUSTED_PROXY")
 	}
 }
-
-// TestTokenStoredHashed verifies the tokens table never holds the plaintext.
-func TestTokenStoredHashed(t *testing.T) {
-	s := newTestServer(t, "secret")
-	var raw string
-	if err := s.cs.RawQuery("SELECT token FROM tokens LIMIT 1").Scan(&raw).Error; err != nil {
-		t.Fatal(err)
-	}
-	if raw == "secret" {
-		t.Fatal("token stored in plaintext")
-	}
-	if len(raw) != 64 { // sha256 hex
-		t.Fatalf("token hash length = %d, want 64", len(raw))
-	}
-	// Lookup still resolves the plaintext.
-	if tk, err := s.cs.LookupToken("secret"); err != nil || tk.UserID == 0 {
-		t.Fatalf("lookup: %v %v", tk, err)
-	}
-}

@@ -82,7 +82,9 @@ func decodeConflictBytes(payload []byte) *Conflict {
 	readTerms := func() []Term {
 		n := 0
 		if idx < len(lines) {
-			fmt.Sscanf(lines[idx], "%d", &n)
+			// A malformed count line parses as 0 terms; the surrounding
+			// line-count guard already bounds the loop.
+			_, _ = fmt.Sscanf(lines[idx], "%d", &n)
 			idx++
 		}
 		terms := make([]Term, 0, n)

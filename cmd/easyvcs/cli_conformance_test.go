@@ -139,4 +139,3 @@ func TestCLIFetchPullPushLocal(t *testing.T) {
 		t.Fatalf("remote missing pushed revision %s: %v", newRev.ID, err)
 	}
 }
-

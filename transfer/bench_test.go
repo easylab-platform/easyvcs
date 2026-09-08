@@ -49,7 +49,7 @@ func buildRepo(tb testing.TB, n int) (*store.Repo, *store.CentralStore) {
 // push path when the peer has nothing).
 func BenchmarkCollectFull(b *testing.B) {
 	repo, cs := buildRepo(b, 20)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, err := CollectAll(repo)
@@ -63,7 +63,7 @@ func BenchmarkCollectFull(b *testing.B) {
 // peer already owns most objects (so they are skipped).
 func BenchmarkCollectDeltaSkip(b *testing.B) {
 	repo, cs := buildRepo(b, 20)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	// Pretend the peer has all ids: hasObject always true -> skip everything.
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -77,7 +77,7 @@ func BenchmarkCollectDeltaSkip(b *testing.B) {
 // BenchmarkJSONSize reports the serialized size of a full bundle as plain JSON.
 func BenchmarkJSONSize(b *testing.B) {
 	repo, cs := buildRepo(b, 20)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	bundle, err := CollectAll(repo)
 	if err != nil {
 		b.Fatal(err)

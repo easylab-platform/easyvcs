@@ -20,6 +20,7 @@ package server
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -102,7 +103,45 @@ func (s *Server) Router() *http.ServeMux { return s.router() }
 type storeAuditSink struct{ cs *store.CentralStore }
 
 func (s *storeAuditSink) Record(ev store.AuditEvent) {
-	_ = s.cs.RecordAudit(ev)
+	if err := s.cs.RecordAudit(ev); err != nil {
+		// Audit is append-only diagnostics; a write failure must not break the
+		// request, but it must not be invisible either.
+		log.Printf("easyvcs-server: audit write failed: %v", err)
+	}
+}
+
+// auditDenied and auditOK are helpers that build an AuditEvent for the current
+// request with the standard fields, so handler code stays one line.
+func (s *Server) auditDenied(r *http.Request, tk *store.Token, detail string) {
+	ev := auditEvent(r, tk)
+	ev.Outcome = outcomeDenied
+	ev.Detail = detail
+	s.audit.Record(ev)
+}
+
+func (s *Server) auditOK(r *http.Request, tk *store.Token, detail string) {
+	ev := auditEvent(r, tk)
+	ev.Outcome = outcomeOK
+	ev.Detail = detail
+	s.audit.Record(ev)
+}
+
+// outcome constants for audit events.
+const (
+	outcomeDenied = "denied"
+	outcomeOK     = "ok"
+)
+
+// auditEvent captures the common fields of an audit record from a request.
+func auditEvent(r *http.Request, tk *store.Token) store.AuditEvent {
+	return store.AuditEvent{
+		Timestamp: time.Now().UTC().UnixMilli(),
+		Action:    actionName(r),
+		Namespace: r.PathValue("ns"),
+		Repo:      r.PathValue("name"),
+		UserID:    userID(tk),
+		IP:        remoteIP(r),
+	}
 }
 
 // authenticate resolves the request's bearer token to a user. It returns the
@@ -142,40 +181,39 @@ func (s *Server) requireRepoAccess(write bool, next http.HandlerFunc) http.Handl
 		// Bound the request body to prevent unbounded memory use (413 on
 		// overrun; reads beyond the limit error out).
 		r.Body = http.MaxBytesReader(w, r.Body, s.maxBody)
-		ns, name := r.PathValue("ns"), r.PathValue("name")
 		tk, ok := s.authenticate(r)
 		if !ok {
-			s.audit.Record(store.AuditEvent{Timestamp: time.Now().UTC().UnixMilli(), Action: actionName(r), Namespace: ns, Repo: name, UserID: nil, IP: remoteIP(r), Outcome: "denied", Detail: "bad token"})
+			s.auditDenied(r, nil, "bad token")
 			writeErr(w, http.StatusUnauthorized, fmt.Errorf("unauthorized: missing or invalid token"))
 			return
 		}
 		if write && tk != nil && tk.Level == "read" {
-			s.audit.Record(store.AuditEvent{Timestamp: time.Now().UTC().UnixMilli(), Action: actionName(r), Namespace: ns, Repo: name, UserID: userID(tk), IP: remoteIP(r), Outcome: "denied", Detail: "read-level token"})
+			s.auditDenied(r, tk, "read-level token")
 			writeErr(w, http.StatusForbidden, fmt.Errorf("forbidden: read-level token cannot write"))
 			return
 		}
-		rref := store.RepoRef{Namespace: ns, Name: name}
+		rref := store.RepoRef{Namespace: r.PathValue("ns"), Name: r.PathValue("name")}
 		if write {
 			if !s.cs.UserCanWriteRepo(rref, userID(tk)) {
-				s.audit.Record(store.AuditEvent{Timestamp: time.Now().UTC().UnixMilli(), Action: actionName(r), Namespace: ns, Repo: name, UserID: userID(tk), IP: remoteIP(r), Outcome: "denied", Detail: "no write access"})
+				s.auditDenied(r, tk, "no write access")
 				writeErr(w, http.StatusForbidden, fmt.Errorf("forbidden: no write access to %s", rref))
 				return
 			}
 			// Branch-level allowlist is enforced in handlePush once the bundle is
 			// decoded (CanPushBranch per ref).
 		} else if !s.cs.UserCanReadRepo(rref, userID(tk)) {
-			s.audit.Record(store.AuditEvent{Timestamp: time.Now().UTC().UnixMilli(), Action: actionName(r), Namespace: ns, Repo: name, UserID: userID(tk), IP: remoteIP(r), Outcome: "denied", Detail: "no read access"})
+			s.auditDenied(r, tk, "no read access")
 			writeErr(w, http.StatusForbidden, fmt.Errorf("forbidden: no read access to %s", rref))
 			return
 		}
 		// Record the allowed read access (push success is recorded in handlePush).
 		if !write {
-			s.audit.Record(store.AuditEvent{Timestamp: time.Now().UTC().UnixMilli(), Action: actionName(r), Namespace: ns, Repo: name, UserID: userID(tk), IP: remoteIP(r), Outcome: "ok"})
+			s.auditOK(r, tk, "")
 		}
-		next(w, r)
+		// Stash the resolved token for the handler (avoid re-authenticating).
+		next(w, r.WithContext(withToken(r.Context(), tk)))
 	}
 }
-
 
 // actionName returns the protocol action for audit purposes.
 func actionName(r *http.Request) string {
@@ -273,17 +311,15 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
-	ns, name := r.PathValue("ns"), r.PathValue("name")
-	// The authenticated token, resolved once (requireRepoAccess already
-	// authenticated; re-reading the header here avoids a second store lookup).
-	tk, _ := s.authenticate(r)
+	// The token resolved by requireRepoAccess, stashed in the request context.
+	tk := tokenFrom(r.Context())
 	repo, ok := s.repo(w, r)
 	if !ok {
 		return
 	}
 	// Read-only mirrors reject all writes.
 	if repo.IsMirror() {
-		s.audit.Record(store.AuditEvent{Timestamp: time.Now().UTC().UnixMilli(), Action: "push", Namespace: ns, Repo: name, UserID: userID(tk), IP: remoteIP(r), Outcome: "denied", Detail: "mirror repo"})
+		s.auditDenied(r, tk, "mirror repo")
 		writeErr(w, http.StatusForbidden, fmt.Errorf("forbidden: %s is a read-only mirror", repo))
 		return
 	}
@@ -311,7 +347,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if !allowed {
-				s.audit.Record(store.AuditEvent{Timestamp: time.Now().UTC().UnixMilli(), Action: "push", Namespace: ns, Repo: name, UserID: &tk.UserID, IP: remoteIP(r), Outcome: "denied", Detail: "branch " + rf.Name + " not in allowlist"})
+				s.auditDenied(r, tk, "branch "+rf.Name+" not in allowlist")
 				writeErr(w, http.StatusForbidden, fmt.Errorf("forbidden: branch %s not allowed for this user", rf.Name))
 				return
 			}
@@ -347,8 +383,24 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Audit the successful write.
-	s.audit.Record(store.AuditEvent{Timestamp: time.Now().UTC().UnixMilli(), Action: "push", Namespace: ns, Repo: name, UserID: userID(tk), IP: remoteIP(r), Outcome: "ok", Detail: fmt.Sprintf("applied=%d", n)})
+	s.auditOK(r, tk, fmt.Sprintf("applied=%d", n))
 	writeJSON(w, http.StatusOK, map[string]any{"applied": n, "repo": repo.String()})
+}
+
+// withToken stashes the resolved token in the request context for handlers.
+type ctxKey int
+
+const ctxToken ctxKey = iota
+
+func withToken(ctx context.Context, tk *store.Token) context.Context {
+	return context.WithValue(ctx, ctxToken, tk)
+}
+
+// tokenFrom retrieves the token stashed by requireRepoAccess (nil when
+// anonymous).
+func tokenFrom(ctx context.Context) *store.Token {
+	tk, _ := ctx.Value(ctxToken).(*store.Token)
+	return tk
 }
 
 // withRepoLock runs fn while holding the per-repo push mutex.
@@ -423,7 +475,7 @@ func decodeBundleBody(r *http.Request) (*transfer.Bundle, error) {
 		if err != nil {
 			return nil, err
 		}
-		defer gr.Close()
+		defer func() { _ = gr.Close() }()
 		// Bound decompression too: a small gzip payload must not inflate to
 		// unbounded memory.
 		data, err := io.ReadAll(io.LimitReader(gr, maxInflatedBody))
@@ -484,4 +536,3 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 	}
 	writeJSON(w, code, map[string]any{"error": err.Error()})
 }
-

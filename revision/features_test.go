@@ -31,12 +31,12 @@ func newTestRepo(t *testing.T) (*store.Repo, *store.CentralStore) {
 func runBoth(t *testing.T, fn func(t *testing.T, ws *Workspace, dir string)) {
 	t.Run("repo1", func(t *testing.T) {
 		repo, cs := newTestRepo(t)
-		defer cs.Close()
+		defer func() { _ = cs.Close() }()
 		fn(t, NewWorkspace(repo), t.TempDir())
 	})
 	t.Run("repo2", func(t *testing.T) {
 		repo, cs := newTestRepo(t)
-		defer cs.Close()
+		defer func() { _ = cs.Close() }()
 		fn(t, NewWorkspace(repo), t.TempDir())
 	})
 }
@@ -244,7 +244,7 @@ func TestCentralObjectsDedup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	r1, _ := cs.Create(store.RepoRef{Namespace: "a", Name: "r1"})
 	r2, _ := cs.Create(store.RepoRef{Namespace: "a", Name: "r2"})
 

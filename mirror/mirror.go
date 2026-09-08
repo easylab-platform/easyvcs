@@ -61,7 +61,7 @@ func Push(ctx context.Context, repo *store.Repo, t PushTarget) (*PushResult, err
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }()
 
 	// Materialize the tree into a fresh worktree that is also the git repo,
 	// so the exported files live at the repository root.
@@ -111,7 +111,7 @@ func Pull(ctx context.Context, repo *store.Repo, cfg PullConfig) (*store.Revisio
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }()
 
 	src, err := clone(ctx, cfg.URL, cfg.Branch, cfg.Token, tmp)
 	if err != nil {
@@ -227,6 +227,3 @@ func run(ctx context.Context, dir, token string, args ...string) error {
 	}
 	return nil
 }
-
-// touch writes a marker file; reserved for future per-mirror sequencing.
-func touch(dir string) error { return os.MkdirAll(dir, 0o755) }

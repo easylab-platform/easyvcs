@@ -104,7 +104,7 @@ func UnmarshalBinary(data []byte) (*Bundle, error) {
 		if err != nil {
 			return nil, err
 		}
-		defer gr.Close()
+		defer func() { _ = gr.Close() }()
 		raw, err := io.ReadAll(gr)
 		if err != nil {
 			return nil, err

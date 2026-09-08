@@ -33,7 +33,7 @@ func TestConformanceCollectObjectsWhere(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("EASYVCS_HOME", home)
 	cs, _ := store.OpenDefault()
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	repo, _ := cs.Create(store.RepoRef{Namespace: "n", Name: "r"})
 	rootID := seedTreeRepo(t, repo)
 
@@ -64,7 +64,7 @@ func TestCollectWithHaveSkipsKnownRevisions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("EASYVCS_HOME", home)
 	cs, _ := store.OpenDefault()
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	repo, _ := cs.Create(store.RepoRef{Namespace: "n", Name: "r"})
 	treeID := seedTreeRepo(t, repo)
 	s := &store.Snapshot{RevisionID: "revA", TreeID: treeID, Author: store.Author{Name: "t"}}
@@ -93,7 +93,7 @@ func TestFilterBundleByWant(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("EASYVCS_HOME", home)
 	cs, _ := store.OpenDefault()
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	repo, _ := cs.Create(store.RepoRef{Namespace: "n", Name: "r"})
 	treeID := seedTreeRepo(t, repo)
 	s := &store.Snapshot{RevisionID: "revA", TreeID: treeID, Author: store.Author{Name: "t"}}
@@ -118,9 +118,9 @@ func TestFilterBundleByWant(t *testing.T) {
 // ExpectedRefs and that the wire frame is not broken.
 func TestBundleBinaryRoundTrip(t *testing.T) {
 	b := &Bundle{Version: Version, Repo: store.RepoRef{Namespace: "n", Name: "r"},
-		Revisions:  []*store.Revision{{ID: "revA", Hash: object.BlobID([]byte("h"))}},
-		Refs:       []*store.Ref{{Name: "main", Kind: store.RefBranch, Target: "revA"}},
-		Objects:    []ObjectRecord{{Kind: object.KindBlob, Content: []byte("data")}},
+		Revisions:    []*store.Revision{{ID: "revA", Hash: object.BlobID([]byte("h"))}},
+		Refs:         []*store.Ref{{Name: "main", Kind: store.RefBranch, Target: "revA"}},
+		Objects:      []ObjectRecord{{Kind: object.KindBlob, Content: []byte("data")}},
 		ExpectedRefs: []*store.Ref{{Name: "main", Kind: store.RefBranch, Target: "expected"}},
 	}
 	// JSON round-trip (uses json tag "changes" for BackwardCompat).

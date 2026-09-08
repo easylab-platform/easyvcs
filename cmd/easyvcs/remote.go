@@ -36,15 +36,13 @@ type advertiseResp struct {
 func cmdRemote(c *ctx) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "remote:", err)
-		os.Exit(1)
+		c.fatal("remote:", err)
 	}
 	args := os.Args[2:]
 	if len(args) == 0 {
 		remotes, err := repo.ListRemotes()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "remote:", err)
-			os.Exit(1)
+			c.fatal("remote:", err)
 		}
 		for _, r := range remotes {
 			fmt.Printf("%s\t%s\n", r.Name, r.URL)
@@ -77,12 +75,10 @@ func cmdRemote(c *ctx) {
 			}
 		}
 		if name == "" || url == "" {
-			fmt.Fprintln(os.Stderr, "usage: remote add <name> <url> [--token <token>]")
-			os.Exit(1)
+			c.fatal("usage: remote add <name> <url> [--token <token>]")
 		}
 		if err := repo.PutRemote(name, url, token); err != nil {
-			fmt.Fprintln(os.Stderr, "remote add:", err)
-			os.Exit(1)
+			c.fatal("remote add:", err)
 		}
 		if token != "" {
 			fmt.Printf("added remote %s -> %s (with token)\n", name, url)
@@ -91,19 +87,16 @@ func cmdRemote(c *ctx) {
 		}
 	case "remove", "rm":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: remote remove <name>")
-			os.Exit(1)
+			c.fatal("usage: remote remove <name>")
 		}
 		if err := repo.DeleteRemote(args[1]); err != nil {
-			fmt.Fprintln(os.Stderr, "remote remove:", err)
-			os.Exit(1)
+			c.fatal("remote remove:", err)
 		}
 		fmt.Printf("removed remote %s\n", args[1])
 	default:
 		rem, err := repo.GetRemote(args[0])
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "remote:", err)
-			os.Exit(1)
+			c.fatal("remote:", err)
 		}
 		fmt.Printf("%s\t%s\n", rem.Name, rem.URL)
 	}
@@ -124,10 +117,33 @@ func remoteClient() *http.Client {
 	return &http.Client{Transport: &http.Transport{Protocols: protocols}}
 }
 
+// maybeGzip compresses body when it is large enough to benefit. On any
+// compression failure the original body is sent uncompressed (a valid
+// fallback: the server accepts both), and the error is returned to the caller
+// so it is never silently invisible.
+func maybeGzip(body []byte) (payload []byte, gzipped bool, err error) {
+	if len(body) <= 1024 {
+		return body, false, nil
+	}
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(body); err != nil {
+		return nil, false, err
+	}
+	if err := gw.Close(); err != nil {
+		return nil, false, err
+	}
+	return buf.Bytes(), true, nil
+}
+
 // doPost performs an HTTP POST with an optional gzip-compressed body and token,
 // returning the raw response body bytes.
 func doPost(url string, body []byte, token string) ([]byte, error) {
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	payload, gzipped, err := maybeGzip(body)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -135,22 +151,15 @@ func doPost(url string, body []byte, token string) ([]byte, error) {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	if len(body) > 1024 {
-		var buf bytes.Buffer
-		gw := gzip.NewWriter(&buf)
-		if _, err := gw.Write(body); err == nil {
-			if err := gw.Close(); err == nil {
-				req.Header.Set("Content-Encoding", "gzip")
-				req.Body = io.NopCloser(bytes.NewReader(buf.Bytes()))
-				req.ContentLength = int64(buf.Len())
-			}
-		}
+	if gzipped {
+		req.Header.Set("Content-Encoding", "gzip")
+		req.ContentLength = int64(len(payload))
 	}
 	resp, err := remoteClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		rb, _ := io.ReadAll(resp.Body)
 		return nil, nonFastForwardOr(resp.StatusCode, rb, fmt.Errorf("server error %d: %s", resp.StatusCode, string(rb)))
@@ -165,40 +174,13 @@ func postJSON(url string, body any, out any, token string) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	data, err := doPost(url, payload, token)
 	if err != nil {
 		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	if len(payload) > 1024 {
-		var buf bytes.Buffer
-		gw := gzip.NewWriter(&buf)
-		if _, err := gw.Write(payload); err == nil {
-			if err := gw.Close(); err == nil {
-				req.Header.Set("Content-Encoding", "gzip")
-				req.Body = io.NopCloser(bytes.NewReader(buf.Bytes()))
-				req.ContentLength = int64(buf.Len())
-			}
-		}
-	}
-	resp, err := remoteClient().Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		rb, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server error %d: %s", resp.StatusCode, string(rb))
 	}
 	if out != nil {
-		return json.NewDecoder(resp.Body).Decode(out)
+		return json.Unmarshal(data, out)
 	}
-	// Drain the response body so the connection can be reused; a drain error is
-	// non-fatal to the request's outcome and is intentionally not surfaced.
-	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
 
@@ -235,7 +217,7 @@ func doPostCompressed(url string, body []byte, token string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		rb, _ := io.ReadAll(resp.Body)
 		return nil, nonFastForwardOr(resp.StatusCode, rb, fmt.Errorf("server error %d: %s", resp.StatusCode, string(rb)))
@@ -250,8 +232,8 @@ func doPostCompressed(url string, body []byte, token string) ([]byte, error) {
 func nonFastForwardOr(code int, body []byte, fallback error) error {
 	if code == http.StatusConflict {
 		var v struct {
-			Error            string         `json:"error"`
-			ConflictingRefs  []*store.Ref   `json:"conflicting_refs"`
+			Error           string       `json:"error"`
+			ConflictingRefs []*store.Ref `json:"conflicting_refs"`
 		}
 		if err := json.Unmarshal(body, &v); err == nil && v.Error == "non-fast-forward" {
 			return &transfer.NonFastForwardError{ConflictingRefs: v.ConflictingRefs}
@@ -398,12 +380,10 @@ func baseForRepo(base string, repoRef store.RepoRef) string {
 func cmdFetch(c *ctx) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "fetch:", err)
-		os.Exit(1)
+		c.fatal("fetch:", err)
 	}
 	if err := doFetch(repo, os.Args[2:]); err != nil {
-		fmt.Fprintln(os.Stderr, "fetch:", err)
-		os.Exit(1)
+		c.fatal("fetch:", err)
 	}
 }
 
@@ -478,18 +458,15 @@ func recordFetchedRefs(repo *store.Repo, remoteName string, list []*store.Ref, d
 func cmdPull(c *ctx) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "pull:", err)
-		os.Exit(1)
+		c.fatal("pull:", err)
 	}
 	args := os.Args[2:]
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: pull <remote> [branch]")
-		os.Exit(1)
+		c.fatal("usage: pull <remote> [branch]")
 	}
 	rem, err := resolveRemote(repo, args[0])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "pull:", err)
-		os.Exit(1)
+		c.fatal("pull:", err)
 	}
 	// Determine the branch to merge: explicit arg, else the remote's default
 	// branch, else the repo's default branch.
@@ -502,14 +479,12 @@ func cmdPull(c *ctx) {
 		want = meta.DefaultBranch
 	}
 	if want == "" {
-		fmt.Fprintln(os.Stderr, "pull: no branch specified and no default; pass a branch name")
-		os.Exit(1)
+		c.fatal("pull: no branch specified and no default; pass a branch name")
 	}
 
 	if isLocalURL(rem.URL) {
 		if err := doLocalPull(c, repo, rem, want, rem.URL); err != nil {
-			fmt.Fprintln(os.Stderr, "pull:", err)
-			os.Exit(1)
+			c.fatal("pull:", err)
 		}
 		return
 	}
@@ -518,12 +493,11 @@ func cmdPull(c *ctx) {
 
 	var adv advertiseResp
 	if err := postJSON(full+"/advertise", advertiseReq{Have: currentRevisionIDs(repo)}, &adv, rem.Token); err != nil {
-		fmt.Fprintln(os.Stderr, "pull:", err)
-		os.Exit(1)
+		c.fatal("pull:", err)
 	}
 
 	// Restrict the fetch to just that chain, and capture the remote tip.
-	var fetchReq advertiseReq = advertiseReq{
+	var fetchReq = advertiseReq{
 		Have:        currentRevisionIDs(repo),
 		HaveObjects: objectIDsAsStrings(ownObjects(repo)),
 	}
@@ -538,14 +512,12 @@ func cmdPull(c *ctx) {
 		}
 	}
 	if !found {
-		fmt.Fprintln(os.Stderr, "pull: branch not found on server:", want)
-		os.Exit(1)
+		c.fatal("pull: branch not found on server:", want)
 	}
 	// Collaborative pull: fetch objects, then rebase the remote tip onto the
 	// local branch tip so the two merge into one line.
 	if err := collaborativePull(c, repo, rem, full, fetchReq, want, remoteTip); err != nil {
-		fmt.Fprintln(os.Stderr, "pull:", err)
-		os.Exit(1)
+		c.fatal("pull:", err)
 	}
 }
 
@@ -580,7 +552,7 @@ func doPull(repo *store.Repo, args []string) error {
 	if err := postJSON(full+"/advertise", advertiseReq{Have: currentRevisionIDs(repo)}, &adv, rem.Token); err != nil {
 		return err
 	}
-	var fetchReq advertiseReq = advertiseReq{
+	var fetchReq = advertiseReq{
 		Have:        currentRevisionIDs(repo),
 		HaveObjects: objectIDsAsStrings(ownObjects(repo)),
 	}
@@ -754,25 +726,21 @@ func doLocalPull(c *ctx, repo *store.Repo, rem *store.Remote, branch, url string
 func cmdPush(c *ctx) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "push:", err)
-		os.Exit(1)
+		c.fatal("push:", err)
 	}
 	args := os.Args[2:]
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: push <remote>")
-		os.Exit(1)
+		c.fatal("usage: push <remote>")
 	}
 	rem, err := resolveRemote(repo, args[0])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "push:", err)
-		os.Exit(1)
+		c.fatal("push:", err)
 	}
 	full := baseForRepo(rem.URL, repo.RepoRef())
 
 	if isLocalURL(rem.URL) {
 		if err := doPushLocal(repo, rem); err != nil {
-			fmt.Fprintln(os.Stderr, "push:", err)
-			os.Exit(1)
+			c.fatal("push:", err)
 		}
 		return
 	}
@@ -784,8 +752,7 @@ func cmdPush(c *ctx) {
 		// Advertise failure is fatal: falling back to a "full" push built from
 		// local state would skip revisions the server lacks and leave dangling
 		// refs. The server is unreachable or rejecting us; surface that.
-		fmt.Fprintln(os.Stderr, "push: advertise failed:", err)
-		os.Exit(1)
+		c.fatal("push: advertise failed:", err)
 	}
 	// Incremental: skip revisions/snapshots the server already advertises. An
 	// empty advertise means the server holds nothing yet: send the full bundle
@@ -793,24 +760,20 @@ func cmdPush(c *ctx) {
 	have := adv.Changes
 	b, err := transfer.Collect(repo, have, nil)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "push:", err)
-		os.Exit(1)
+		c.fatal("push:", err)
 	}
 
 	data, err := postBundle(full+"/push", b, rem.Token)
 	if err != nil {
 		var nff *transfer.NonFastForwardError
 		if errors.As(err, &nff) {
-			fmt.Fprintf(os.Stderr, "push: %v\n(pull the branch and merge before pushing again)\n", nff)
-			os.Exit(1)
+			c.fatalf("push: %v\n(pull the branch and merge before pushing again)\n", nff)
 		}
-		fmt.Fprintln(os.Stderr, "push:", err)
-		os.Exit(1)
+		c.fatal("push:", err)
 	}
 	var resp map[string]any
 	if err := json.Unmarshal(data, &resp); err != nil {
-		fmt.Fprintln(os.Stderr, "push:", err)
-		os.Exit(1)
+		c.fatal("push:", err)
 	}
 	fmt.Printf("pushed to %s: %v\n", rem.URL, resp)
 }
@@ -843,24 +806,6 @@ func doPushLocal(repo *store.Repo, rem *store.Remote) error {
 	return nil
 }
 
-// localRemoteRefs returns the branch refs the local repo believes the remote
-// holds, from the recorded remote_refs for `remoteName`. It is the client-side
-// expectation used to let the server reject a non-fast-forward push.
-func localRemoteRefs(repo *store.Repo, remoteName string) ([]*store.Ref, error) {
-	rrefs, err := repo.ListRemoteRefs(remoteName)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*store.Ref, 0, len(rrefs))
-	for _, rr := range rrefs {
-		if rr.Kind != store.RefBranch {
-			continue
-		}
-		out = append(out, &store.Ref{Name: rr.Name, Kind: store.RefBranch, Target: rr.Target})
-	}
-	return out, nil
-}
-
 // ownObjects returns all object ids the repo already holds.
 func ownObjects(repo *store.Repo) []object.ID {
 	ids, _ := transfer.EnumerateObjectIDs(repo)
@@ -874,49 +819,4 @@ func objectIDsAsStrings(ids []object.ID) []string {
 		out = append(out, id.String())
 	}
 	return out
-}
-
-// --- git interop (no smart protocol, full transfer + minimal diff commit) ---
-
-func gitArg() string {
-	args := os.Args[2:]
-	if len(args) == 0 {
-		return ""
-	}
-	return args[0]
-}
-
-func copyDirTree(src, dst string, skipGit bool) error {
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if skipGit && (e.Name() == ".git" || e.Name() == ".easyvcs") {
-			continue
-		}
-		sPath := filepath.Join(src, e.Name())
-		dPath := filepath.Join(dst, e.Name())
-		if e.IsDir() {
-			if err := os.MkdirAll(dPath, 0o755); err != nil {
-				return err
-			}
-			if err := copyDirTree(sPath, dPath, skipGit); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := copyFile(sPath, dPath); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0o644)
 }

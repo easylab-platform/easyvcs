@@ -26,7 +26,7 @@ func TestMarkers(t *testing.T) {
 	}
 	// Nested dir loads parent's marker.
 	sub := filepath.Join(dir, "sub")
-	os.MkdirAll(sub, 0o755)
+	_ = os.MkdirAll(sub, 0o755)
 	foundDir, got2, err := LoadMarker(sub)
 	if err != nil {
 		t.Fatal(err)
@@ -52,7 +52,9 @@ func TestWorkspaceResolve(t *testing.T) {
 	}
 	// Missing repo
 	dir2 := t.TempDir()
-	WriteMarker(dir2, &WorkspaceMarker{Repo: RepoRef{Namespace: "no", Name: "repo"}})
+	if err := WriteMarker(dir2, &WorkspaceMarker{Repo: RepoRef{Namespace: "no", Name: "repo"}}); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := cs.ResolveWorkspace(dir2); err == nil {
 		t.Fatal("expected error resolving missing repo")
 	}

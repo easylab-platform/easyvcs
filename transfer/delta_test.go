@@ -24,7 +24,7 @@ func gzipBytes(data []byte) []byte {
 // shrinks to only the objects that are genuinely new.
 func TestFetchDeltaSkipsKnownObjects(t *testing.T) {
 	repo, cs, ws := newTestRepo3(t)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	seedThreeChanges(t, repo, ws)
 
 	// Enumerate the object ids we "already have".
@@ -106,7 +106,7 @@ func seedThreeChanges(t *testing.T, repo *store.Repo, ws *revision.Workspace) {
 // TestGzipBundleSize verifies gzip shrinks the JSON bundle dramatically.
 func TestGzipBundleSize(t *testing.T) {
 	repo, cs, ws := newTestRepo3(t)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	seedThreeChanges(t, repo, ws)
 	bundle, err := CollectAll(repo)
 	if err != nil {

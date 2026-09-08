@@ -200,7 +200,7 @@ func TestEndToEndMockPushFetch(t *testing.T) {
 	s := newTestServer(t, "")
 	seedRepo(t, s)
 	srv := httptest.NewServer(s.Router())
-	defer srv.Close()
+	defer func() { srv.Close() }()
 
 	// The server store has the repo (team/app) with revisions rev1/rev2 and main
 	// -> rev1. A "remote" client that already has rev1 should, on advertise, see

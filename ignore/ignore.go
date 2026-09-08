@@ -153,9 +153,17 @@ func (m *Matcher) HasAnyMatchUnder(dir string) bool {
 
 // layerApplies reports whether a gitignore matcher mentions the candidate path
 // at all (so it can override an outer layer), and whether the path ends up
-// ignored after honoring negation within that file.
+// ignored after honoring negation within that file. A matching error from the
+// pattern engine is treated as "does not apply" and the final verdict falls
+// back to the plain MatchesPath evaluation, so a broken pattern never silently
+// ignores (excludes) a file it should not.
 func layerApplies(gi *ignore.GitIgnore, candidate string) (applies, ignored bool) {
-	matched, _ := gi.MatchesPathHow(candidate)
+	matched, err := gi.MatchesPathHow(candidate)
+	if err != nil {
+		// Fall back to the non-negation evaluation; conservatively "applies"
+		// so the final MatchesPath verdict decides.
+		return true, gi.MatchesPath(candidate)
+	}
 	if !matched {
 		return false, false
 	}

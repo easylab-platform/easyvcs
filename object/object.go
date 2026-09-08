@@ -81,21 +81,23 @@ func (o *Object) ID() ID {
 // into the hash so callers can namespace hashes if needed.
 func HashID(o *Object, context []byte) ID {
 	h := blake3.New(hashLen, context)
-	fmt.Fprintf(h, "%d\n", o.Kind)
+	// Hash writes go to an in-memory hasher and cannot fail; ignoring the
+	// (always-nil) errors keeps the hash pipeline readable.
+	_, _ = fmt.Fprintf(h, "%d\n", o.Kind)
 	switch o.Kind {
 	case KindBlob:
-		fmt.Fprintf(h, "%d\n", len(o.Blob))
-		h.Write(o.Blob)
+		_, _ = fmt.Fprintf(h, "%d\n", len(o.Blob))
+		_, _ = h.Write(o.Blob)
 	case KindTree:
 		o.Tree.encoded(h)
 	case KindConflict:
-		fmt.Fprintf(h, "%d\n", len(o.Conflict.Removes))
+		_, _ = fmt.Fprintf(h, "%d\n", len(o.Conflict.Removes))
 		for _, t := range o.Conflict.Removes {
-			fmt.Fprintf(h, "%s\n%s\n", hex.EncodeToString(t.ID[:]), t.Label)
+			_, _ = fmt.Fprintf(h, "%s\n%s\n", hex.EncodeToString(t.ID[:]), t.Label)
 		}
-		fmt.Fprintf(h, "%d\n", len(o.Conflict.Adds))
+		_, _ = fmt.Fprintf(h, "%d\n", len(o.Conflict.Adds))
 		for _, t := range o.Conflict.Adds {
-			fmt.Fprintf(h, "%s\n%s\n", hex.EncodeToString(t.ID[:]), t.Label)
+			_, _ = fmt.Fprintf(h, "%s\n%s\n", hex.EncodeToString(t.ID[:]), t.Label)
 		}
 	}
 	var out ID
@@ -136,9 +138,9 @@ func (t *Tree) SortedEntries() []Entry {
 }
 
 func (t *Tree) encoded(h interface{ Write([]byte) (int, error) }) {
-	fmt.Fprintf(h, "%d\n", len(t.Entries))
+	_, _ = fmt.Fprintf(h, "%d\n", len(t.Entries))
 	for _, e := range t.SortedEntries() {
-		fmt.Fprintf(h, "%s\n%d\n%s\n", e.Name, e.Kind, hex.EncodeToString(e.ID[:]))
+		_, _ = fmt.Fprintf(h, "%s\n%d\n%s\n", e.Name, e.Kind, hex.EncodeToString(e.ID[:]))
 	}
 }
 

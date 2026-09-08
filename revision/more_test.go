@@ -107,7 +107,6 @@ func TestIgnoredHelpers(t *testing.T) {
 	if HasIgnoresCompiled(nil) {
 		t.Fatal("nil matcher should not count as has ignores")
 	}
-	_ = pathKey("x")
 }
 
 func TestIgnoreHashAndRebuildTreeFiltered(t *testing.T) {

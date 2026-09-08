@@ -46,7 +46,7 @@ func TestCollectErrorOnListRevisionsFail(t *testing.T) {
 	// closed central store is exercised indirectly. We instead test that a
 	// repo with no revisions returns an empty bundle without error.
 	repo, cs := seedTransferRepo(t)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	empty, err := CollectAll(repo)
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +58,7 @@ func TestCollectErrorOnListRevisionsFail(t *testing.T) {
 
 func TestApplyObjectDecodeErrorRollsBackNothing(t *testing.T) {
 	repo, cs := seedTransferRepo(t)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	// A bundle with a bad object kind should error out of Apply.
 	bad := &Bundle{Objects: []ObjectRecord{{Kind: object.Kind(99), Content: []byte("x")}}}
 	if _, err := Apply(repo, bad); err == nil {
@@ -68,7 +68,7 @@ func TestApplyObjectDecodeErrorRollsBackNothing(t *testing.T) {
 
 func TestCompressBundleRoundTrip(t *testing.T) {
 	repo, cs := seedTransferRepo(t)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	b, _ := CollectAll(repo)
 	compressed, err := CompressBundle(b)
 	if err != nil {
@@ -85,7 +85,7 @@ func TestCompressBundleRoundTrip(t *testing.T) {
 
 func TestApplyPutErrorPropagates(t *testing.T) {
 	repo, cs := seedTransferRepo(t)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	// A bundle with snapshot whose RefKind is invalid isn't a store error; but a
 	// snapshot referencing a nonexistent repo is hard. Instead we test that a
 	// duplicate snapshot id doesn't error (idempotent), exercising PutSnapshot's

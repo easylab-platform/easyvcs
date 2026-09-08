@@ -169,4 +169,3 @@ func TestCLIMessageRewritesMessage(t *testing.T) {
 		t.Fatalf("tree should not change on message rewrite")
 	}
 }
-

@@ -50,13 +50,16 @@ func (u *upstream) get(ctx context.Context, path string, query url.Values) (int,
 	if err != nil {
 		return 0, nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(resp.Body)
 	return resp.StatusCode, b, err
 }
 
 func (u *upstream) post(ctx context.Context, path string, body any) (int, []byte, error) {
-	b, _ := json.Marshal(body)
+	b, err := json.Marshal(body)
+	if err != nil {
+		return 0, nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.self+path, strings.NewReader(string(b)))
 	if err != nil {
 		return 0, nil, err
@@ -66,20 +69,19 @@ func (u *upstream) post(ctx context.Context, path string, body any) (int, []byte
 	if err != nil {
 		return 0, nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	return resp.StatusCode, data, err
 }
 
 // services fetches /api/v1/ops/services and maps onto the UI container shape.
+// A non-200 status is not actionable for this aggregate mapping pass; the body
+// is still decoded so callers can surface a partial/empty result.
 func (u *upstream) services(ctx context.Context) ([]map[string]any, error) {
-	code, b, err := u.get(ctx, "/api/v1/ops/services", url.Values{})
+	_, b, err := u.get(ctx, "/api/v1/ops/services", url.Values{})
 	if err != nil {
 		return nil, err
 	}
-	// Non-200 status is not actionable for an aggregate mapping pass; the body
-	// is still decoded below so callers can surface a partial/empty result.
-	_ = code
 	var list []map[string]any
 	if err := json.Unmarshal(b, &list); err != nil {
 		return nil, err

@@ -1,6 +1,7 @@
 package revision
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -79,7 +80,10 @@ func (w *Workspace) ComputeChangesFromDir(parentHash object.ID, dir string) ([]F
 	} else {
 		parentTree = object.NewTree()
 	}
-	m, _ := ignore.New(dir)
+	m, err := ignore.New(dir)
+	if err != nil {
+		return nil, fmt.Errorf("load ignore rules: %w", err)
+	}
 	work, err := scanTreeFromFS(dir, m)
 	if err != nil {
 		return nil, err

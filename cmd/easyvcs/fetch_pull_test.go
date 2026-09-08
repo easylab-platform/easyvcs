@@ -39,7 +39,7 @@ func TestFetchRecordsRemoteRefs(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := stubRemoteServer2(t, remoteRepo)
-	defer srv.Close()
+	defer func() { srv.Close() }()
 
 	setHome(t)
 	localRepo := createRepoIn(t, "demo", "source")
@@ -86,7 +86,7 @@ func TestPullDefaultBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := stubRemoteServer2(t, remoteRepo)
-	defer srv.Close()
+	defer func() { srv.Close() }()
 
 	setHome(t)
 	localRepo := createRepoIn(t, "demo", "source")

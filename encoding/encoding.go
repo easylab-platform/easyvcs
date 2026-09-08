@@ -12,7 +12,6 @@ package encoding
 
 import (
 	"errors"
-	"time"
 
 	"github.com/easylab-platform/easyvcs/object"
 )
@@ -85,11 +84,10 @@ func DecodeSnapshotMeta(payload []byte) (SnapshotMeta, error) {
 	off += adv
 	email := string(payload[off : off+int(ln)])
 	off += int(ln)
-	// description
+	// description (the final field; no trailing offset bookkeeping needed)
 	ln, adv = readUvarint(payload[off:])
 	off += adv
 	desc := string(payload[off : off+int(ln)])
-	off += int(ln)
 	return SnapshotMeta{Parents: parents, Author: Author{Name: name, Email: email}, Description: desc}, nil
 }
 
@@ -185,5 +183,3 @@ func readUvarint(data []byte) (uint64, int) {
 	}
 	return v, len(data)
 }
-
-var _ = time.Now

@@ -24,7 +24,7 @@ func newTestCentral(t *testing.T) *CentralStore {
 func TestHomeDirDefault(t *testing.T) {
 	// When EASYVCS_HOME is unset, HomeDir returns a path under the user home.
 	t.Setenv("EASYVCS_HOME", "") // note: setting empty still counts as set in our impl
-	os.Unsetenv("EASYVCS_HOME")
+	_ = os.Unsetenv("EASYVCS_HOME")
 	if got := HomeDir(); got == "" {
 		t.Fatal("HomeDir should not be empty")
 	}
@@ -317,7 +317,7 @@ func TestSetWAL(t *testing.T) {
 
 func TestDBPathOverride(t *testing.T) {
 	t.Setenv("EASYVCS_HOME", "/tmp/opencode/evhome_test")
-	os.MkdirAll("/tmp/opencode/evhome_test", 0o755)
+	_ = os.MkdirAll("/tmp/opencode/evhome_test", 0o755)
 	if got := DBPath(); got != filepath.Join("/tmp/opencode/evhome_test", DefaultDBFile) {
 		t.Fatalf("dbpath: %s", got)
 	}
@@ -340,4 +340,3 @@ func TestAuthorString(t *testing.T) {
 		t.Fatalf("got %q", a2.String())
 	}
 }
-

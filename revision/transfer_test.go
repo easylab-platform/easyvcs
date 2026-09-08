@@ -29,7 +29,7 @@ func newTestRepo2(t *testing.T) (*store.Repo, *store.CentralStore, *Workspace) {
 // repository's changes and refs on another repo.
 func TestTransferCollectApplyRoundTrip(t *testing.T) {
 	repoA, csA, wsA := newTestRepo2(t)
-	defer csA.Close()
+	defer func() { _ = csA.Close() }()
 	// Seed repoA with two changes and a ref.
 	baseTree := object.NewTree()
 	baseTree.Entries["a.txt"] = object.Entry{Name: "a.txt", Kind: object.KindBlob, ID: mustWriteBlob(wsA, []byte("one"))}
@@ -57,7 +57,7 @@ func TestTransferCollectApplyRoundTrip(t *testing.T) {
 
 	// Apply into a fresh repoB.
 	repoB, csB, _ := newTestRepo2(t)
-	defer csB.Close()
+	defer func() { _ = csB.Close() }()
 	// repoB is a second repo in the same central store; use a separate one.
 	repoB2, err := csA.Create(store.RepoRef{Namespace: "n", Name: "rB"})
 	if err != nil {

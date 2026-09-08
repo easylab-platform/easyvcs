@@ -1,0 +1,20 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+
+issues:
+  exclude-rules:
+    # Response writers and cleanup paths are legitimately best-effort.
+    - path: _test\.go
+      linters:
+        - errcheck

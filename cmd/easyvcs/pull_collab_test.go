@@ -66,11 +66,11 @@ func stubRemoteServer(t *testing.T, remoteRepo *store.Repo) *httptest.Server {
 func TestCollaborativePullMergesRemoteFirstTime(t *testing.T) {
 	// ---- Remote store (the "other" easylab) ----
 	setHome(t)
-	homeA := t.TempDir()
 	csA, err := store.OpenDefault()
+	if err != nil {
+		t.Fatal(err)
+	}
 	_ = csA
-	homeA = "" // OpenDefault uses EASYVCS_HOME; set below
-	_ = homeA
 	remoteRepo := createRepoIn(t, "demo", "source")
 	ws := revision.NewWorkspace(remoteRepo)
 	// commit base + feat on remote, then branch feature.

@@ -97,7 +97,7 @@ func runGit(t *testing.T, dir string, args ...string) {
 
 func TestPushToBare(t *testing.T) {
 	repo, cs := newTestRepo(t)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	seed(t, repo, "a.txt", "hello")
 
 	dst := initBareGit(t, "")
@@ -119,7 +119,7 @@ func TestPushToBare(t *testing.T) {
 
 func TestPushForceOverwrites(t *testing.T) {
 	repo, cs := newTestRepo(t)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	seed(t, repo, "a.txt", "v1")
 	dst := initBareGit(t, "")
 
@@ -142,7 +142,7 @@ func TestPushForceOverwrites(t *testing.T) {
 
 func TestPullFromGit(t *testing.T) {
 	repo, cs := newTestRepo(t)
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 
 	src := t.TempDir()
 	initGit(t, src, map[string]string{"hello.txt": "world"})

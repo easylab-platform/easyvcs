@@ -2,6 +2,7 @@ package gitbridge
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -36,9 +37,9 @@ type PushOptions struct {
 	Revisions []string
 	// Tags, if set, are exported as lightweight git tags (refs/tags/<name>)
 	// pointing at the tip commit of each revision.
-	Tags []TagRef
+	Tags   []TagRef
 	Author store.Author
-	Token string
+	Token  string
 	// SSHKey, when set (a path to a PEM private key), authenticates ssh:// and
 	// git@host remotes via public key. When empty, an SSH agent is used.
 	SSHKey string
@@ -80,7 +81,7 @@ func ExportRevisions(ws *revision.Workspace, repo *store.Repo, opts PushOptions)
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	g, err := git.PlainInit(dir, false)
 	if err != nil {
@@ -145,9 +146,13 @@ func ExportRevisions(ws *revision.Workspace, repo *store.Repo, opts PushOptions)
 	}
 	// If the destination is a local path, point its HEAD at the pushed branch so
 	// a subsequent clone/fetch sees a valid default branch (a bare repo pushed
-	// with go-git keeps its original unborn HEAD otherwise).
+	// with go-git keeps its original unborn HEAD otherwise). A failure here is
+	// non-fatal: the push itself already succeeded and HEAD only affects the
+	// default branch a later clone sees.
 	if isLocalPath(opts.Dest) {
-		_ = setDestHEAD(opts.Dest, opts.Branch)
+		if err := setDestHEAD(opts.Dest, opts.Branch); err != nil {
+			log.Printf("gitbridge: set dest HEAD %s: %v", opts.Dest, err)
+		}
 	}
 	return shas, nil
 }
@@ -218,7 +223,11 @@ func renameBranchTo(g *git.Repository, branch string) error {
 	if err := g.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, newRef)); err != nil {
 		return err
 	}
-	_ = g.Storer.RemoveReference(plumbing.NewBranchReferenceName(head.Name().Short()))
+	// Removing the old branch ref is best-effort: the new ref + HEAD above are
+	// authoritative, and the stale branch ref (if any) is harmless.
+	if err := g.Storer.RemoveReference(plumbing.NewBranchReferenceName(head.Name().Short())); err != nil {
+		log.Printf("gitbridge: remove old branch ref: %v", err)
+	}
 	return nil
 }
 
@@ -230,7 +239,7 @@ func ImportBranch(ws *revision.Workspace, repo *store.Repo, opts ImportOptions) 
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	co := &git.CloneOptions{URL: opts.Source}
 	auth, err := authFor(opts.Source, opts.Token, opts.SSHKey, opts.SSHKeyPassphrase)
@@ -262,10 +271,12 @@ func ImportBranch(ws *revision.Workspace, repo *store.Repo, opts ImportOptions) 
 	defer iter.Close()
 
 	var commits []*gitobject.Commit
-	_ = iter.ForEach(func(c *gitobject.Commit) error {
+	if err := iter.ForEach(func(c *gitobject.Commit) error {
 		commits = append(commits, c)
 		return nil
-	})
+	}); err != nil {
+		return nil, fmt.Errorf("walk git history: %w", err)
+	}
 	reverse(commits)
 
 	var out []string
@@ -315,16 +326,18 @@ func importTags(ws *revision.Workspace, repo *store.Repo, g *git.Repository) err
 		if rid == "" {
 			return nil // commit not imported; skip
 		}
-		// Create/keep an immutable tag (re-tagging an existing name is refused).
+		// Create/keep an immutable tag. Re-tagging an existing name is refused
+		// by SetRef; since tags are immutable, an existing tag with this name
+		// is accepted as-is (the import is idempotent).
 		if _, err := ws.SetRef(name, store.RefTag, rid); err != nil {
-			// Tag already exists — ignore (immutable).
-			_ = err
+			if _, gerr := ws.GetRef(name); gerr != nil {
+				return err // not a duplicate tag; a real failure
+			}
 		}
 		return nil
 	})
 	return err
 }
-
 
 func exportOneRevision(ws *revision.Workspace, g *git.Repository, dir string, opts PushOptions, revID string) (plumbing.Hash, error) {
 	rev, err := ws.GetRevision(revID)
@@ -363,7 +376,7 @@ func importOneCommit(ws *revision.Workspace, repo *store.Repo, opts ImportOption
 	if err != nil {
 		return "", err
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	tree, err := c.Tree()
 	if err != nil {
@@ -384,7 +397,7 @@ func importOneCommit(ws *revision.Workspace, repo *store.Repo, opts ImportOption
 		}
 	}
 
-	snap, ch, err := ws.Commit(revision.CommitParams{
+	_, ch, err := ws.Commit(revision.CommitParams{
 		RevisionID:  revID,
 		Parents:     parentSet(parentSnapID),
 		TreeID:      treeID,
@@ -394,7 +407,6 @@ func importOneCommit(ws *revision.Workspace, repo *store.Repo, opts ImportOption
 	if err != nil {
 		return "", err
 	}
-	_ = snap
 	if err := repo.PutGitLink(ch.ID, c.Hash.String(), "", "import"); err != nil {
 		return "", err
 	}
@@ -484,8 +496,8 @@ func clearDir(dir string) error {
 func copyGitTree(t *gitobject.Tree, dir, prefix string) error {
 	for _, e := range t.Entries {
 		full := dir + "/" + e.Name
-		switch {
-		case e.Mode == 040000:
+		switch e.Mode {
+		case 040000: // directory
 			sub, err := t.Tree(e.Name)
 			if err != nil {
 				return err
@@ -496,7 +508,7 @@ func copyGitTree(t *gitobject.Tree, dir, prefix string) error {
 			if err := copyGitTree(sub, full, e.Name); err != nil {
 				return err
 			}
-		default:
+		default: // regular file / symlink contents
 			f, err := t.File(e.Name)
 			if err != nil {
 				return err
@@ -575,4 +587,3 @@ func reverse(cs []*gitobject.Commit) {
 		cs[i], cs[j] = cs[j], cs[i]
 	}
 }
-

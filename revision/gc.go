@@ -1,6 +1,7 @@
 package revision
 
 import (
+	"fmt"
 
 	"github.com/easylab-platform/easyvcs/object"
 	"github.com/easylab-platform/easyvcs/store"
@@ -54,18 +55,24 @@ func GCRun(cs *store.CentralStore, opts GCOptions) (GCResult, error) {
 		return res, err
 	}
 	res.Total = len(all)
+	repo := firstRepo(cs)
 	for _, id := range all {
 		if reachable[id.String()] {
 			continue
 		}
-		res.Swept++
 		if opts.DryRun {
+			res.Swept++
 			continue
 		}
-		// Delete from the shared object store.
-		if repo := firstRepo(cs); repo != nil {
-			_ = repo.DeleteObject(id)
+		// Delete from the shared object store. A failed delete must not be
+		// counted as swept (the report would lie about the store's state).
+		if repo == nil {
+			return res, fmt.Errorf("gc: no repository handle to delete objects from")
 		}
+		if err := repo.DeleteObject(id); err != nil {
+			return res, fmt.Errorf("gc: delete object %s: %w", id, err)
+		}
+		res.Swept++
 	}
 	return res, nil
 }

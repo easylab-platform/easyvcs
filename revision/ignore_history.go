@@ -12,9 +12,6 @@ import (
 	"github.com/easylab-platform/easyvcs/store"
 )
 
-// pathKey sorts paths deterministically.
-func pathKey(s string) string { return s }
-
 // RewriteHistoryWithIgnores rewrites all snapshots that are ancestors of
 // revisionID so that any path now matched by the matcher is removed from every
 // affected snapshot's tree. Each rewritten snapshot keeps its revision id and
@@ -39,7 +36,6 @@ func (w *Workspace) RewriteHistoryWithIgnores(root string, m *ignore.Matcher, re
 	}
 
 	visited := map[string]bool{}
-	var order []string // breadth-first ancestors; not strictly topological
 	queue := []string{revisionID}
 	for len(queue) > 0 {
 		id := queue[0]
@@ -48,7 +44,6 @@ func (w *Workspace) RewriteHistoryWithIgnores(root string, m *ignore.Matcher, re
 			continue
 		}
 		visited[id] = true
-		order = append(order, id)
 		ch := byID[id]
 		if ch == nil {
 			continue
@@ -151,8 +146,8 @@ func IgnoreHash(root string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		fmt.Fprintf(h, "%s\n", filepath.ToSlash(f))
-		h.Write(data)
+		_, _ = fmt.Fprintf(h, "%s\n", filepath.ToSlash(f))
+		_, _ = h.Write(data)
 	}
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
@@ -175,6 +170,3 @@ func collectIgnoreFiles(root string) ([]string, error) {
 	sort.Strings(out)
 	return out, err
 }
-
-var _ = pathKey
-var _ = store.ErrNotFound

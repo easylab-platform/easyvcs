@@ -12,13 +12,11 @@ import (
 func cmdGitPull(c *ctx) {
 	gitURLOrDir, branch, token, sshKey, pass, _ := parseGitArgs("git-pull", true)
 	if gitURLOrDir == "" {
-		fmt.Fprintln(os.Stderr, "usage: git-pull <git-repo-or-url> [BRANCH] [--token <t>] [--ssh-key <file>] [--passphrase <p>]")
-		os.Exit(1)
+		c.fatal("usage: git-pull <git-repo-or-url> [BRANCH] [--token <t>] [--ssh-key <file>] [--passphrase <p>]")
 	}
 	repo, marker, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "git-pull:", err)
-		os.Exit(1)
+		c.fatal("git-pull:", err)
 	}
 	ws := revision.NewWorkspace(repo)
 
@@ -29,12 +27,10 @@ func cmdGitPull(c *ctx) {
 		Source: gitURLOrDir, Branch: branch, Token: token, SSHKey: sshKey, SSHKeyPassphrase: pass,
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "git-pull:", err)
-		os.Exit(1)
+		c.fatal("git-pull:", err)
 	}
 	if len(revIDs) == 0 {
-		fmt.Fprintf(os.Stderr, "git-pull: no revisions imported from %s\n", gitURLOrDir)
-		os.Exit(1)
+		c.fatalf("git-pull: no revisions imported from %s\n", gitURLOrDir)
 	}
 
 	// Move the workspace to the newest imported revision and point the branch.
@@ -43,16 +39,13 @@ func cmdGitPull(c *ctx) {
 	marker.CurrentRevision = lastID
 	marker.Branch = branch
 	if err := store.WriteMarker(".", marker); err != nil {
-		fmt.Fprintln(os.Stderr, "git-pull:", err)
-		os.Exit(1)
+		c.fatal("git-pull:", err)
 	}
 	if err := c.cs.PutWorkspace(&store.WorkspaceRow{Path: ".", Repo: marker.Repo, CurrentRevision: lastID, Branch: branch}); err != nil {
-		fmt.Fprintln(os.Stderr, "git-pull:", err)
-		os.Exit(1)
+		c.fatal("git-pull:", err)
 	}
 	if _, err := ws.SetRef(branch, store.RefBranch, lastID); err != nil {
-		fmt.Fprintln(os.Stderr, "git-pull:", err)
-		os.Exit(1)
+		c.fatal("git-pull:", err)
 	}
 	snap, _ := ws.GetSnapshot(lastRev.Hash)
 	if snap != nil {
@@ -64,13 +57,11 @@ func cmdGitPull(c *ctx) {
 func cmdGitPush(c *ctx) {
 	gitDest, branch, token, sshKey, pass, squash := parseGitArgs("git-push", true)
 	if gitDest == "" {
-		fmt.Fprintln(os.Stderr, "usage: git-push <git-repo-or-url> [BRANCH] [--token <t>] [--ssh-key <file>] [--passphrase <p>]")
-		os.Exit(1)
+		c.fatal("usage: git-push <git-repo-or-url> [BRANCH] [--token <t>] [--ssh-key <file>] [--passphrase <p>]")
 	}
 	repo, marker, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "git-push:", err)
-		os.Exit(1)
+		c.fatal("git-push:", err)
 	}
 	ws := revision.NewWorkspace(repo)
 
@@ -80,8 +71,7 @@ func cmdGitPush(c *ctx) {
 		target = b.Target
 	}
 	if target == "" {
-		fmt.Fprintln(os.Stderr, "git-push: no current revision to push")
-		os.Exit(1)
+		c.fatal("git-push: no current revision to push")
 	}
 	// Collect the operand chain (newest -> oldest) then reverse to oldest-first.
 	var chain []string
@@ -111,8 +101,7 @@ func cmdGitPush(c *ctx) {
 		chain[i], chain[j] = chain[j], chain[i]
 	}
 	if len(chain) == 0 {
-		fmt.Fprintln(os.Stderr, "git-push: empty revision chain")
-		os.Exit(1)
+		c.fatal("git-push: empty revision chain")
 	}
 
 	shas, err := gitbridge.ExportRevisions(ws, repo, gitbridge.PushOptions{
@@ -122,8 +111,7 @@ func cmdGitPush(c *ctx) {
 		Tags: collectTags(ws, repo), Squash: squash,
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "git-push:", err)
-		os.Exit(1)
+		c.fatal("git-push:", err)
 	}
 	fmt.Printf("pushed %d revision(s) to git %s (branch %s)\n", len(shas), gitDest, branch)
 }

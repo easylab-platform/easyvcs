@@ -41,30 +41,25 @@ func cmdExport(c *ctx) {
 		}
 	}
 	if len(positional) < 1 || out == "" {
-		fmt.Fprintln(os.Stderr, "usage: export <ns/name> -o FILE")
-		os.Exit(1)
+		c.fatal("usage: export <ns/name> -o FILE")
 	}
 	arg := positional[0]
 	ns, name, err := splitRepo(arg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "export:", err)
-		os.Exit(1)
+		c.fatal("export:", err)
 	}
 	repo, err := c.cs.OpenRepo(store.RepoRef{Namespace: ns, Name: name})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "export:", err)
-		os.Exit(1)
+		c.fatal("export:", err)
 	}
 
 	changes, err := repo.ListRevisions()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "export:", err)
-		os.Exit(1)
+		c.fatal("export:", err)
 	}
 	refs, err := repo.ListRefs()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "export:", err)
-		os.Exit(1)
+		c.fatal("export:", err)
 	}
 
 	var snaps []*store.Snapshot
@@ -105,27 +100,23 @@ func cmdExport(c *ctx) {
 		}
 		snaps = append(snaps, snap)
 		if err := collect(snap.TreeID); err != nil {
-			fmt.Fprintln(os.Stderr, "export:", err)
-			os.Exit(1)
+			c.fatal("export:", err)
 		}
 	}
 
 	b := bundle{Version: 1, Repo: repo.RepoRef(), Revisions: changes, Snapshots: snaps, Refs: refs, Objects: objs}
 	f, err := os.Create(out)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "export:", err)
-		os.Exit(1)
+		c.fatal("export:", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	w := bufio.NewWriter(f)
 	enc := json.NewEncoder(w)
 	if err := enc.Encode(b); err != nil {
-		fmt.Fprintln(os.Stderr, "export:", err)
-		os.Exit(1)
+		c.fatal("export:", err)
 	}
 	if err := w.Flush(); err != nil {
-		fmt.Fprintln(os.Stderr, "export:", err)
-		os.Exit(1)
+		c.fatal("export:", err)
 	}
 	fmt.Printf("exported %s -> %s (%d revisions, %d objects)\n", repo, out, len(changes), len(objs))
 }
@@ -145,19 +136,16 @@ func cmdImport(c *ctx) {
 		}
 	}
 	if file == "" {
-		fmt.Fprintln(os.Stderr, "usage: import FILE [-n namespace]")
-		os.Exit(1)
+		c.fatal("usage: import FILE [-n namespace]")
 	}
 	f, err := os.Open(file)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "import:", err)
-		os.Exit(1)
+		c.fatal("import:", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var b bundle
 	if err := json.NewDecoder(bufio.NewReader(f)).Decode(&b); err != nil {
-		fmt.Fprintln(os.Stderr, "import:", err)
-		os.Exit(1)
+		c.fatal("import:", err)
 	}
 
 	repoRef := b.Repo
@@ -169,20 +157,17 @@ func cmdImport(c *ctx) {
 	var repo *store.Repo
 	exists, err := c.cs.RepoExists(repoRef)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "import:", err)
-		os.Exit(1)
+		c.fatal("import:", err)
 	}
 	if exists {
 		repo, err = c.cs.OpenRepo(repoRef)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "import:", err)
-			os.Exit(1)
+			c.fatal("import:", err)
 		}
 	} else {
 		repo, err = c.cs.Create(repoRef)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "import:", err)
-			os.Exit(1)
+			c.fatal("import:", err)
 		}
 	}
 
@@ -197,30 +182,25 @@ func cmdImport(c *ctx) {
 		}
 		obj, err := decodeBundleObject(ob)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "import:", err)
-			os.Exit(1)
+			c.fatal("import:", err)
 		}
 		if err := repo.WriteObject(obj); err != nil {
-			fmt.Fprintln(os.Stderr, "import:", err)
-			os.Exit(1)
+			c.fatal("import:", err)
 		}
 	}
 	for _, snap := range b.Snapshots {
 		if err := repo.PutSnapshot(snap); err != nil {
-			fmt.Fprintln(os.Stderr, "import:", err)
-			os.Exit(1)
+			c.fatal("import:", err)
 		}
 	}
 	for _, ch := range b.Revisions {
 		if err := repo.PutRevision(ch); err != nil {
-			fmt.Fprintln(os.Stderr, "import:", err)
-			os.Exit(1)
+			c.fatal("import:", err)
 		}
 	}
 	for _, r := range b.Refs {
 		if err := repo.PutRef(r); err != nil {
-			fmt.Fprintln(os.Stderr, "import:", err)
-			os.Exit(1)
+			c.fatal("import:", err)
 		}
 	}
 	fmt.Printf("imported %s (%d revisions)\n", repoRef, len(b.Revisions))

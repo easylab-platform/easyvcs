@@ -83,7 +83,7 @@ func TestTagBranchIntegrationMessage(t *testing.T) {
 		snapA, revA := commitTree(t, ws, dir, "A", nil)
 		_, _ = ws.SetRef("v1", store.RefTag, revA.ID)
 		_ = snapA
-		ws.SetRef("main", store.RefBranch, revA.ID)
+		_, _ = ws.SetRef("main", store.RefBranch, revA.ID)
 		// A source whose revision was derived also carries ForkFrom (round-trip).
 		_, drev, err := ws.Derive(revA.ID, "", true)
 		if err != nil {

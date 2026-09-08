@@ -409,7 +409,6 @@ func (w *Workspace) Resolve(revisionID string, path string, sideIndex int) (*sto
 		return nil, nil, err
 	}
 
-	propagated := 0
 	for _, d := range descendants {
 		curD, err := w.store.GetSnapshot(d.Hash)
 		if err != nil {
@@ -434,11 +433,7 @@ func (w *Workspace) Resolve(revisionID string, path string, sideIndex int) (*sto
 		if err := w.store.UpdateRevisionHash(d.ID, nsD.RevisionHash); err != nil {
 			return nil, nil, err
 		}
-		propagated++
 	}
-	// propagated is intentionally retained as an informational count (how many
-	// descendant revisions carried the same conflict) for future diagnostics.
-	_ = propagated
 	return ns, rev, nil
 }
 
@@ -792,7 +787,7 @@ func (w *Workspace) renderConflict(conflictID object.ID) (string, error) {
 	}
 	c := o.Conflict
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("<<<<<<< conflict (%d terms)\n", c.Numeric()))
+	fmt.Fprintf(&b, "<<<<<<< conflict (%d terms)\n", c.Numeric())
 	if len(c.Adds) > 0 {
 		first, err := w.blobText(c.Adds[0].ID)
 		if err != nil {

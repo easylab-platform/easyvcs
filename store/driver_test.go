@@ -15,7 +15,7 @@ func TestOpenDriverSQLiteDialect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 	r, err := cs.Create(RepoRef{Namespace: "n", Name: "r"})
 	if err != nil {
 		t.Fatal(err)
@@ -36,4 +36,3 @@ func TestOpenDriverDialectors(t *testing.T) {
 		t.Fatal("empty db")
 	}
 }
-

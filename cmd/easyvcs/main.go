@@ -86,6 +86,25 @@ Flags:
 
 type ctx struct {
 	cs *store.CentralStore
+	// onErr, when set, replaces the process-exit behavior of command failures
+	// (tests install a panic-based hook so failures are observable).
+	onErr func()
+}
+
+// fatal reports a command failure and terminates the command. In production it
+// exits the process with status 1; tests may override via onErr.
+func (c *ctx) fatal(args ...any) {
+	fmt.Fprintln(os.Stderr, args...)
+	if c.onErr != nil {
+		c.onErr()
+		return
+	}
+	os.Exit(1)
+}
+
+// fatalf is fatal with formatting.
+func (c *ctx) fatalf(format string, args ...any) {
+	c.fatal(fmt.Sprintf(format, args...))
 }
 
 func main() {
@@ -183,8 +202,7 @@ func main() {
 	case "git-push":
 		cmdGitPush(c)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", cmd, usage)
-		os.Exit(1)
+		c.fatalf("unknown command %q\n\n%s", cmd, usage)
 	}
 }
 
@@ -217,13 +235,11 @@ func (c *ctx) loadRepo() (*store.Repo, *store.WorkspaceMarker, error) {
 func cmdInit(c *ctx) {
 	args := os.Args[2:]
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: init <ns/name> [DIR]")
-		os.Exit(1)
+		c.fatal("usage: init <ns/name> [DIR]")
 	}
 	ns, name, err := splitRepo(args[0])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "init:", err)
-		os.Exit(1)
+		c.fatal("init:", err)
 	}
 	dir := "."
 	if len(args) > 1 {
@@ -231,12 +247,10 @@ func cmdInit(c *ctx) {
 	}
 	repo, err := c.cs.Create(store.RepoRef{Namespace: ns, Name: name})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "init:", err)
-		os.Exit(1)
+		c.fatal("init:", err)
 	}
 	if err := store.WriteMarker(dir, &store.WorkspaceMarker{Repo: repo.RepoRef()}); err != nil {
-		fmt.Fprintln(os.Stderr, "init:", err)
-		os.Exit(1)
+		c.fatal("init:", err)
 	}
 	fmt.Printf("initialized repository %s/%s, workspace bound at %s\n", ns, name, dir)
 }
@@ -281,8 +295,7 @@ func cmdClone(c *ctx) {
 		}
 	}
 	if url == "" {
-		fmt.Fprintln(os.Stderr, "usage: clone <url> [DIR] [-b branch] [-n namespace]")
-		os.Exit(1)
+		c.fatal("usage: clone <url> [DIR] [-b branch] [-n namespace]")
 	}
 	if dir != "" {
 		destDir = dir
@@ -301,8 +314,7 @@ func cmdClone(c *ctx) {
 	if isLocalURL(url) {
 		m, err := store.LookupMarker(expandLocalPath(url))
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "clone:", err)
-			os.Exit(1)
+			c.fatal("clone:", err)
 		}
 		srcRef = m.Repo
 	} else {
@@ -323,29 +335,23 @@ func cmdClone(c *ctx) {
 	home := store.HomeDir()
 	cs, err := store.OpenDefault()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "clone:", err)
-		os.Exit(1)
+		c.fatal("clone:", err)
 	}
 	dstRepo, err := cs.Create(srcRef)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "clone:", err)
-		os.Exit(1)
+		c.fatal("clone:", err)
 	}
 	if err := dstRepo.PutRemote("origin", url, ""); err != nil {
-		fmt.Fprintln(os.Stderr, "clone:", err)
-		os.Exit(1)
+		c.fatal("clone:", err)
 	}
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		fmt.Fprintln(os.Stderr, "clone:", err)
-		os.Exit(1)
+		c.fatal("clone:", err)
 	}
 	if err := store.WriteMarker(destDir, &store.WorkspaceMarker{Repo: dstRepo.RepoRef(), Home: home}); err != nil {
-		fmt.Fprintln(os.Stderr, "clone:", err)
-		os.Exit(1)
+		c.fatal("clone:", err)
 	}
 	if err := cs.PutWorkspace(&store.WorkspaceRow{Path: destDir, Repo: dstRepo.RepoRef(), Branch: branch}); err != nil {
-		fmt.Fprintln(os.Stderr, "clone:", err)
-		os.Exit(1)
+		c.fatal("clone:", err)
 	}
 
 	// Fetch/pull the remote default branch (or explicit branch).
@@ -376,8 +382,7 @@ func cmdClone(c *ctx) {
 		pullErr = doPull(dstRepo, []string{"origin", want})
 	}
 	if pullErr != nil {
-		fmt.Fprintln(os.Stderr, "clone (pull):", pullErr)
-		os.Exit(1)
+		c.fatal("clone (pull):", pullErr)
 	}
 	fmt.Printf("cloned %s -> %s\n", url, destDir)
 }
@@ -413,8 +418,7 @@ func repoRefFromURLPath(url string) (string, string) {
 func cmdWorkspace(c *ctx) {
 	args := os.Args[2:]
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: workspace attach|open|list")
-		os.Exit(1)
+		c.fatal("usage: workspace attach|open|list")
 	}
 	switch args[0] {
 	case "attach", "open":
@@ -422,8 +426,7 @@ func cmdWorkspace(c *ctx) {
 	case "list":
 		cmdWorkspaceList(c)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown workspace subcommand %q\n", args[0])
-		os.Exit(1)
+		c.fatalf("unknown workspace subcommand %q\n", args[0])
 	}
 }
 
@@ -437,36 +440,30 @@ func cmdWorkspaceAttach(c *ctx) {
 		// No marker yet: create from a repo arg if provided.
 		args := os.Args[2:]
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: workspace attach <ns/name> [DIR]")
-			os.Exit(1)
+			c.fatal("usage: workspace attach <ns/name> [DIR]")
 		}
 		ns, name, err := splitRepo(args[1])
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "workspace attach:", err)
-			os.Exit(1)
+			c.fatal("workspace attach:", err)
 		}
 		repo, err := c.cs.OpenRepo(store.RepoRef{Namespace: ns, Name: name})
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "workspace attach:", err)
-			os.Exit(1)
+			c.fatal("workspace attach:", err)
 		}
 		marker = &store.WorkspaceMarker{Repo: repo.RepoRef()}
 		if err := store.WriteMarker(".", marker); err != nil {
-			fmt.Fprintln(os.Stderr, "workspace attach:", err)
-			os.Exit(1)
+			c.fatal("workspace attach:", err)
 		}
 		fmt.Printf("workspace attached to %s\n", repo)
 		return
 	}
 	cs, err := store.OpenStoreForMarker(marker)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "workspace attach:", err)
-		os.Exit(1)
+		c.fatal("workspace attach:", err)
 	}
 	repo, err := cs.OpenRepo(marker.Repo)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "workspace attach: repository not found:", marker.Repo, "(import it first)")
-		os.Exit(1)
+		c.fatal("workspace attach: repository not found:", marker.Repo, "(import it first)")
 	}
 	// If current_revision is set but missing, auto-fork a new tip.
 	if marker.CurrentRevision != "" {
@@ -476,16 +473,17 @@ func cmdWorkspaceAttach(c *ctx) {
 			ws := revision.NewWorkspace(repo)
 			treeID, err := ws.BuildTreeFromFS(".")
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "workspace attach:", err)
-				os.Exit(1)
+				c.fatal("workspace attach:", err)
 			}
 			// Filter the new tree with the ignore matcher before committing.
-			m, _ := ignore.New(".")
+			m, err := ignore.New(".")
+			if err != nil {
+				c.fatal("workspace attach: load ignore rules:", err)
+			}
 			if HasIgnores() {
 				treeID, err = ws.RebuildTreeFiltered(".", m, treeID)
 				if err != nil {
-					fmt.Fprintln(os.Stderr, "workspace attach:", err)
-					os.Exit(1)
+					c.fatal("workspace attach:", err)
 				}
 			}
 			// New revision on top of the repo tip (first branch or root).
@@ -497,13 +495,11 @@ func cmdWorkspaceAttach(c *ctx) {
 				Author:      store.Author{Name: "easyvcs", Email: "easyvcs@example.com"},
 			})
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "workspace attach:", err)
-				os.Exit(1)
+				c.fatal("workspace attach:", err)
 			}
 			marker.CurrentRevision = ch.ID
 			if err := store.WriteMarker(".", marker); err != nil {
-				fmt.Fprintln(os.Stderr, "workspace attach:", err)
-				os.Exit(1)
+				c.fatal("workspace attach:", err)
 			}
 			fmt.Printf("forked new revision %s\n", short(ch.ID))
 		}
@@ -511,8 +507,7 @@ func cmdWorkspaceAttach(c *ctx) {
 	if err := c.cs.PutWorkspace(&store.WorkspaceRow{
 		Path: ".", Repo: marker.Repo, CurrentRevision: marker.CurrentRevision, Branch: marker.Branch,
 	}); err != nil {
-		fmt.Fprintln(os.Stderr, "workspace attach:", err)
-		os.Exit(1)
+		c.fatal("workspace attach:", err)
 	}
 	fmt.Printf("workspace bound to %s (current revision %s)\n", repo, short(marker.CurrentRevision))
 }
@@ -520,8 +515,7 @@ func cmdWorkspaceAttach(c *ctx) {
 func cmdWorkspaceList(c *ctx) {
 	ws, err := c.cs.ListWorkspaces()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "workspace list:", err)
-		os.Exit(1)
+		c.fatal("workspace list:", err)
 	}
 	if len(ws) == 0 {
 		fmt.Println("no workspaces")
@@ -535,8 +529,7 @@ func cmdWorkspaceList(c *ctx) {
 func cmdRepositories(c *ctx) {
 	repos, err := c.cs.List()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "repositories:", err)
-		os.Exit(1)
+		c.fatal("repositories:", err)
 	}
 	if len(repos) == 0 {
 		fmt.Println("no repositories")
@@ -550,8 +543,7 @@ func cmdRepositories(c *ctx) {
 func cmdCommit(c *ctx) {
 	repo, marker, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "commit:", err)
-		os.Exit(1)
+		c.fatal("commit:", err)
 	}
 	ws := revision.NewWorkspace(repo)
 	dir := resolveWorkingDir()
@@ -581,8 +573,7 @@ func cmdCommit(c *ctx) {
 	// produced as file changes.
 	changes, err := ws.ComputeChangesFromDir(parentHash, dir)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "commit:", err)
-		os.Exit(1)
+		c.fatal("commit:", err)
 	}
 
 	// Atomic commit from the computed changes (same code path as the server
@@ -597,8 +588,7 @@ func cmdCommit(c *ctx) {
 		store.Author{Name: "easyvcs", Email: "easyvcs@example.com"}, revisionID,
 	)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "commit:", err)
-		os.Exit(1)
+		c.fatal("commit:", err)
 	}
 	if !isNew && marker.CurrentRevision != "" {
 		fmt.Printf("amended revision %s -> snapshot %s\n", short(ch.ID), short(snap.RevisionHash.String()))
@@ -610,19 +600,16 @@ func cmdCommit(c *ctx) {
 	// history to exclude them and auto-rebase descendants.
 	if HasIgnores() {
 		if err := applyIgnoreRewrite(c, repo, ws, ch.ID, marker); err != nil {
-			fmt.Fprintln(os.Stderr, "commit (ignore rewrite):", err)
-			os.Exit(1)
+			c.fatal("commit (ignore rewrite):", err)
 		}
 	}
 	// Update the workspace pointer to the current revision.
 	marker.CurrentRevision = ch.ID
 	if err := store.WriteMarker(".", marker); err != nil {
-		fmt.Fprintln(os.Stderr, "commit:", err)
-		os.Exit(1)
+		c.fatal("commit:", err)
 	}
 	if err := c.cs.PutWorkspace(&store.WorkspaceRow{Path: ".", Repo: marker.Repo, CurrentRevision: ch.ID, Branch: marker.Branch}); err != nil {
-		fmt.Fprintln(os.Stderr, "commit: record workspace:", err)
-		os.Exit(1)
+		c.fatal("commit: record workspace:", err)
 	}
 }
 
@@ -646,11 +633,8 @@ func applyIgnoreRewrite(c *ctx, repo *store.Repo, ws *revision.Workspace, revisi
 	if prevHash == curHash {
 		return nil // no ignore rules changed
 	}
-	if prevHash == "" {
-		// No baseline: only rewrite if this is not the very first commit (i.e.
-		// there is a parent whose tree still contains ignored paths). We still do
-		// a targeted filter on the current commit's ancestors to be safe.
-	}
+	// (A missing baseline is handled below: the rewrite pass targets the
+	// current commit's ancestors, which is a no-op for a first commit.)
 
 	rewrote, err := ws.RewriteHistoryWithIgnores(".", m, revisionID)
 	if err != nil {
@@ -667,41 +651,35 @@ func applyIgnoreRewrite(c *ctx, repo *store.Repo, ws *revision.Workspace, revisi
 func cmdAmend(c *ctx) {
 	repo, marker, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "amend:", err)
-		os.Exit(1)
+		c.fatal("amend:", err)
 	}
 	ws := revision.NewWorkspace(repo)
 	dir := resolveWorkingDir()
 	revisionID := marker.CurrentRevision
 	cur, err := repo.GetRevision(revisionID)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "amend: no current revision:", err)
-		os.Exit(1)
+		c.fatal("amend: no current revision:", err)
 	}
 	curSnap, err := repo.GetSnapshot(cur.Hash)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "amend:", err)
-		os.Exit(1)
+		c.fatal("amend:", err)
 	}
 	// Compute the diff against the current snapshot's tree using a read-only
 	// scan (no full-tree persistence). The amend rewrites the current revision.
 	changes, err := ws.ComputeChangesFromDir(cur.Hash, dir)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "amend:", err)
-		os.Exit(1)
+		c.fatal("amend:", err)
 	}
 	ns, ch, err := ws.CommitFromChanges(
 		cur.Hash, changes,
 		curSnap.Description, curSnap.Author, revisionID,
 	)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "amend:", err)
-		os.Exit(1)
+		c.fatal("amend:", err)
 	}
 	// Amend keeps the same revision_id; repoint it to the new hash.
 	if err := repo.UpdateRevisionHash(ch.ID, ns.RevisionHash); err != nil {
-		fmt.Fprintln(os.Stderr, "amend:", err)
-		os.Exit(1)
+		c.fatal("amend:", err)
 	}
 	fmt.Printf("amended revision %s -> snapshot %s\n", short(ch.ID), short(ns.RevisionHash.String()))
 }
@@ -709,14 +687,12 @@ func cmdAmend(c *ctx) {
 func cmdLog(c *ctx) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "log:", err)
-		os.Exit(1)
+		c.fatal("log:", err)
 	}
 	ws := revision.NewWorkspace(repo)
 	revs, err := ws.Log()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "log:", err)
-		os.Exit(1)
+		c.fatal("log:", err)
 	}
 	for _, ch := range revs {
 		snap, err := ws.GetSnapshot(ch.Hash)
@@ -736,14 +712,12 @@ func cmdLog(c *ctx) {
 func cmdLogPath(c *ctx, path string, countOnly bool) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "log:", err)
-		os.Exit(1)
+		c.fatal("log:", err)
 	}
 	ws := revision.NewWorkspace(repo)
 	edits, err := ws.FileHistory("", path)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "log:", err)
-		os.Exit(1)
+		c.fatal("log:", err)
 	}
 	if countOnly {
 		fmt.Println(len(edits))
@@ -758,22 +732,18 @@ func cmdLogPath(c *ctx, path string, countOnly bool) {
 func cmdShow(c *ctx) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "show:", err)
-		os.Exit(1)
+		c.fatal("show:", err)
 	}
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: show <sha>")
-		os.Exit(1)
+		c.fatal("usage: show <sha>")
 	}
 	id, err := object.HexToID(os.Args[2])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "show:", err)
-		os.Exit(1)
+		c.fatal("show:", err)
 	}
 	snap, err := repo.GetSnapshot(id)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "show:", err)
-		os.Exit(1)
+		c.fatal("show:", err)
 	}
 	fmt.Printf("snapshot  %s\n", snap.RevisionHash)
 	fmt.Printf("revision  %s\n", snap.RevisionID)
@@ -788,22 +758,18 @@ func cmdShow(c *ctx) {
 func cmdCheckout(c *ctx) {
 	repo, marker, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "checkout:", err)
-		os.Exit(1)
+		c.fatal("checkout:", err)
 	}
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: checkout <sha> [DEST]")
-		os.Exit(1)
+		c.fatal("usage: checkout <sha> [DEST]")
 	}
 	id, err := object.HexToID(os.Args[2])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "checkout:", err)
-		os.Exit(1)
+		c.fatal("checkout:", err)
 	}
 	snap, err := repo.GetSnapshot(id)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "checkout: unknown snapshot:", err)
-		os.Exit(1)
+		c.fatal("checkout: unknown snapshot:", err)
 	}
 	ws := revision.NewWorkspace(repo)
 	dest := ""
@@ -817,18 +783,15 @@ func cmdCheckout(c *ctx) {
 		dest = "."
 	}
 	if err := ws.Materialize(snap.TreeID, dest); err != nil {
-		fmt.Fprintln(os.Stderr, "checkout:", err)
-		os.Exit(1)
+		c.fatal("checkout:", err)
 	}
 	// Checkout repoints the workspace's current_change only (does not touch db).
 	marker.CurrentRevision = snap.RevisionID
 	if err := store.WriteMarker(".", marker); err != nil {
-		fmt.Fprintln(os.Stderr, "checkout:", err)
-		os.Exit(1)
+		c.fatal("checkout:", err)
 	}
 	if err := c.cs.PutWorkspace(&store.WorkspaceRow{Path: ".", Repo: marker.Repo, CurrentRevision: snap.RevisionID, Branch: marker.Branch}); err != nil {
-		fmt.Fprintln(os.Stderr, "checkout:", err)
-		os.Exit(1)
+		c.fatal("checkout:", err)
 	}
 	fmt.Printf("checked out snapshot %s (revision %s)\n", short(id.String()), short(snap.RevisionID))
 }
@@ -836,8 +799,7 @@ func cmdCheckout(c *ctx) {
 func cmdRebase(c *ctx) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "rebase:", err)
-		os.Exit(1)
+		c.fatal("rebase:", err)
 	}
 	args := os.Args[2:]
 	var positional []string
@@ -848,8 +810,7 @@ func cmdRebase(c *ctx) {
 			if i+1 < len(args) {
 				id, err := object.HexToID(args[i+1])
 				if err != nil {
-					fmt.Fprintln(os.Stderr, "rebase:", err)
-					os.Exit(1)
+					c.fatal("rebase:", err)
 				}
 				ontoIDs = append(ontoIDs, id)
 				i++
@@ -859,14 +820,12 @@ func cmdRebase(c *ctx) {
 		}
 	}
 	if len(positional) < 1 || len(ontoIDs) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: rebase <revision> [--onto <parent-sha>]...")
-		os.Exit(1)
+		c.fatal("usage: rebase <revision> [--onto <parent-sha>]...")
 	}
 	ws := revision.NewWorkspace(repo)
 	ns, ch, err := ws.Rebase(positional[0], ontoIDs)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "rebase:", err)
-		os.Exit(1)
+		c.fatal("rebase:", err)
 	}
 	fmt.Printf("rebased revision %s (id unchanged) -> snapshot %s\n", short(ch.ID), short(ns.RevisionHash.String()))
 	// Report conflicts embedded in the new tree, if any.
@@ -881,12 +840,10 @@ func cmdRebase(c *ctx) {
 func cmdResolve(c *ctx) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "resolve:", err)
-		os.Exit(1)
+		c.fatal("resolve:", err)
 	}
 	if len(os.Args) < 4 {
-		fmt.Fprintln(os.Stderr, "usage: resolve <revision> <path> [--side N]")
-		os.Exit(1)
+		c.fatal("usage: resolve <revision> <path> [--side N]")
 	}
 	revisionID := os.Args[2]
 	path := os.Args[3]
@@ -895,7 +852,9 @@ func cmdResolve(c *ctx) {
 		switch os.Args[i] {
 		case "--side", "-side":
 			if i+1 < len(os.Args) {
-				fmt.Sscanf(os.Args[i+1], "%d", &side)
+				if _, serr := fmt.Sscanf(os.Args[i+1], "%d", &side); serr != nil {
+					c.fatalf("invalid --side %q (expected a number)", os.Args[i+1])
+				}
 				i++
 			}
 		}
@@ -903,8 +862,7 @@ func cmdResolve(c *ctx) {
 	ws := revision.NewWorkspace(repo)
 	ns, ch, err := ws.Resolve(revisionID, path, side)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "resolve:", err)
-		os.Exit(1)
+		c.fatal("resolve:", err)
 	}
 	fmt.Printf("resolved conflict %s in revision %s -> snapshot %s\n", path, short(ch.ID), short(ns.RevisionHash.String()))
 }
@@ -912,18 +870,15 @@ func cmdResolve(c *ctx) {
 func cmdSquash(c *ctx) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "squash:", err)
-		os.Exit(1)
+		c.fatal("squash:", err)
 	}
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: squash <revision>")
-		os.Exit(1)
+		c.fatal("usage: squash <revision>")
 	}
 	ws := revision.NewWorkspace(repo)
 	parentSnap, parentCh, err := ws.Squash(os.Args[2])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "squash:", err)
-		os.Exit(1)
+		c.fatal("squash:", err)
 	}
 	fmt.Printf("squashed into revision %s -> snapshot %s\n", short(parentCh.ID), short(parentSnap.RevisionHash.String()))
 }
@@ -931,13 +886,11 @@ func cmdSquash(c *ctx) {
 func cmdBranch(c *ctx) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "branch:", err)
-		os.Exit(1)
+		c.fatal("branch:", err)
 	}
 	args := os.Args[2:]
 	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: branch <name> <revision> [--message <text>] [--auto-commit]")
-		os.Exit(1)
+		c.fatal("usage: branch <name> <revision> [--message <text>] [--auto-commit]")
 	}
 	name := args[0]
 	revisionArg := args[1]
@@ -961,8 +914,7 @@ func cmdBranch(c *ctx) {
 	ws := revision.NewWorkspace(repo)
 	revisionID, err := resolveRevisionArg(ws, repo, revisionArg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "branch:", err)
-		os.Exit(1)
+		c.fatal("branch:", err)
 	}
 
 	// A branch always owns a distinct revision id so an in-place amend on one
@@ -972,22 +924,20 @@ func cmdBranch(c *ctx) {
 	// name is idempotent and keeps its already-private target. message comes
 	// from --message (or is inherited from the source); auto_commit finalizes an
 	// uncommitted fork.
-	target := revisionID
+	var target string
 	if cur, cerr := ws.GetRef(name); cerr == nil && cur != nil && cur.Kind == store.RefBranch {
 		// Branch already exists and owns its derived target: no-op.
 		target = cur.Target
 	} else {
 		_, ch, err2 := ws.Derive(revisionID, message, autoCommit)
 		if err2 != nil {
-			fmt.Fprintln(os.Stderr, "branch:", err2)
-			os.Exit(1)
+			c.fatal("branch:", err2)
 		}
 		target = ch.ID
 	}
 	r, err := ws.SetRef(name, store.RefBranch, target)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "branch:", err)
-		os.Exit(1)
+		c.fatal("branch:", err)
 	}
 	if target != revisionID {
 		fmt.Printf("branch %s -> revision %s (forked from %s)\n", r.Name, short(r.Target), short(revisionID))
@@ -999,24 +949,20 @@ func cmdBranch(c *ctx) {
 func cmdMessage(c *ctx) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "message:", err)
-		os.Exit(1)
+		c.fatal("message:", err)
 	}
 	args := os.Args[2:]
 	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: message <revision> <text>")
-		os.Exit(1)
+		c.fatal("usage: message <revision> <text>")
 	}
 	ws := revision.NewWorkspace(repo)
 	revisionID, err := resolveRevisionArg(ws, repo, args[0])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "message:", err)
-		os.Exit(1)
+		c.fatal("message:", err)
 	}
 	ns, ch, err := ws.SetDescription(revisionID, args[1])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "message:", err)
-		os.Exit(1)
+		c.fatal("message:", err)
 	}
 	fmt.Printf("updated message on revision %s (id unchanged) -> snapshot %s\n", short(ch.ID), short(ns.RevisionHash.String()))
 }
@@ -1057,19 +1003,16 @@ func resolveRevisionArg(ws *revision.Workspace, repo *store.Repo, arg string) (s
 func cmdTag(c *ctx) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tag:", err)
-		os.Exit(1)
+		c.fatal("tag:", err)
 	}
 	if len(os.Args) < 4 {
-		fmt.Fprintln(os.Stderr, "usage: tag <name> <revision>")
-		os.Exit(1)
+		c.fatal("usage: tag <name> <revision>")
 	}
 	ws := revision.NewWorkspace(repo)
 	// A tag is immutable: re-tagging an existing name is rejected by SetRef.
 	r, err := ws.SetRef(os.Args[2], store.RefTag, os.Args[3])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tag:", err)
-		os.Exit(1)
+		c.fatal("tag:", err)
 	}
 	fmt.Printf("tag %s -> revision %s\n", r.Name, short(r.Target))
 }
@@ -1077,13 +1020,11 @@ func cmdTag(c *ctx) {
 func cmdRefs(c *ctx) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "refs:", err)
-		os.Exit(1)
+		c.fatal("refs:", err)
 	}
 	refs, err := revision.NewWorkspace(repo).ListRefs()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "refs:", err)
-		os.Exit(1)
+		c.fatal("refs:", err)
 	}
 	for _, r := range refs {
 		fmt.Printf("%s  %s -> revision %s\n", r.Kind, r.Name, short(r.Target))
@@ -1099,8 +1040,7 @@ func cmdGC(c *ctx) {
 	}
 	res, err := revision.GCRun(c.cs, revision.GCOptions{DryRun: dry})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "gc:", err)
-		os.Exit(1)
+		c.fatal("gc:", err)
 	}
 	if dry {
 		fmt.Printf("gc (dry-run): %d object(s) present, %d would be pruned\n", res.Total, res.Swept)
@@ -1112,44 +1052,37 @@ func cmdGC(c *ctx) {
 func cmdVerify(c *ctx) {
 	res, err := revision.Verify(c.cs)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "verify:", err)
-		os.Exit(1)
+		c.fatal("verify:", err)
 	}
 	fmt.Printf("verify: repos=%d revisions=%d snapshots=%d objects=%d missing_objects=%d broken_snapshots=%d\n",
 		res.Repos, res.Revisions, res.Snapshots, res.Objects, res.MissingObjects, res.BrokenSnapshots)
 	if res.MissingObjects > 0 || res.BrokenSnapshots > 0 {
-		fmt.Fprintln(os.Stderr, "verify: FAILED — dangling objects or broken snapshots found")
-		os.Exit(1)
+		c.fatal("verify: FAILED — dangling objects or broken snapshots found")
 	}
 }
 
 func cmdDiff(c *ctx) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "diff:", err)
-		os.Exit(1)
+		c.fatal("diff:", err)
 	}
 	if len(os.Args) < 4 {
-		fmt.Fprintln(os.Stderr, "usage: diff <shaA> <shaB>")
-		os.Exit(1)
+		c.fatal("usage: diff <shaA> <shaB>")
 	}
 	a, err := object.HexToID(os.Args[2])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "diff:", err)
-		os.Exit(1)
+		c.fatal("diff:", err)
 	}
 	b, err := object.HexToID(os.Args[3])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "diff:", err)
-		os.Exit(1)
+		c.fatal("diff:", err)
 	}
 	ws := revision.NewWorkspace(repo)
 	aTree := snapshotOrTree(ws, a)
 	bTree := snapshotOrTree(ws, b)
 	fileDiffs, err := ws.DiffContent(aTree, bTree)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "diff:", err)
-		os.Exit(1)
+		c.fatal("diff:", err)
 	}
 	for _, fd := range fileDiffs {
 		prefix := "M"
@@ -1174,18 +1107,18 @@ func cmdDiff(c *ctx) {
 func cmdMerge(c *ctx) {
 	repo, _, err := c.loadRepo()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "merge:", err)
-		os.Exit(1)
+		c.fatal("merge:", err)
 	}
 	fs := flag.NewFlagSet("merge", flag.ExitOnError)
 	var base, ours, theirs string
 	fs.StringVar(&base, "base", "", "base tree sha")
 	fs.StringVar(&ours, "ours", "", "ours tree sha")
 	fs.StringVar(&theirs, "theirs", "", "theirs tree sha")
-	fs.Parse(os.Args[2:])
+	if err := fs.Parse(os.Args[2:]); err != nil {
+		c.fatal("merge:", err)
+	}
 	if base == "" || ours == "" || theirs == "" {
-		fmt.Fprintln(os.Stderr, "usage: merge --base <sha> --ours <sha> --theirs <sha>")
-		os.Exit(1)
+		c.fatal("usage: merge --base <sha> --ours <sha> --theirs <sha>")
 	}
 	b, _ := object.HexToID(base)
 	o, _ := object.HexToID(ours)
@@ -1193,8 +1126,7 @@ func cmdMerge(c *ctx) {
 	ws := revision.NewWorkspace(repo)
 	mergedID, conflicts, err := ws.Merge(b, o, t)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "merge:", err)
-		os.Exit(1)
+		c.fatal("merge:", err)
 	}
 	fmt.Printf("merged tree %s\n", mergedID.String())
 	for _, cf := range conflicts {
@@ -1240,5 +1172,3 @@ func short(s string) string {
 	}
 	return s
 }
-
-func pwd() string { d, _ := filepath.Abs("."); return filepath.Clean(d) }
