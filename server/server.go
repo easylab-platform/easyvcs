@@ -1,30 +1,26 @@
-// Command easyvcs-server is the authoritative EasyVCS VCS protocol server.
-//
-// It exposes the change-native smart protocol (advertise / fetch / push) over
-// HTTP against the central store (the same ~/.easyvcs/easyvcs.db used by the
-// CLI). Repositories are addressed by namespace and name:
-//
+// Package server is the authoritative EasyVCS VCS protocol server, expressed as
+// a reusable library so it can be embedded by easylab or run as a standalone
+// binary (see cmd/server). It exposes the change-native smart protocol
+// (advertise / fetch / push) against the central store over HTTP:
+
 //	POST /repo/{namespace}/{name}/advertise   (read-only)
 //	POST /repo/{namespace}/{name}/fetch       (read-only)
 //	POST /repo/{namespace}/{name}/push        (auth + non-fast-forward check)
 //
-// By default it listens on :8996 and speaks HTTP/1.1 and cleartext HTTP/2, so
-// the easyvcs CLI (h1+h2 dual-stack) and the easylab aggregator both reach it.
-// Write endpoints require a bearer token from EASYVCS_TOKEN (comma-separated);
-// when unset, write is open (like the CLI-driven easylab default).
-package main
+// By default it speaks HTTP/1.1 and cleartext HTTP/2, so the easyvcs CLI (h1+h2
+// dual-stack) and the easylab aggregator both reach it. Write endpoints require
+// a bearer token from EASYVCS_TOKEN (comma-separated); when unset, write is
+// open (like the CLI-driven easylab default).
+package server
 
 import (
 	"bytes"
 	"compress/gzip"
 	"crypto/subtle"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/easylab-platform/easyvcs/object"
@@ -32,69 +28,45 @@ import (
 	"github.com/easylab-platform/easyvcs/transfer"
 )
 
-// advertiseReq/Resp mirror the CLI's smart protocol request/response.
-type advertiseReq struct {
+// AdvertiseReq/Resp mirror the CLI's smart protocol request/response.
+type AdvertiseReq struct {
 	Have        []string `json:"have"`
 	HaveObjects []string `json:"have_objects"`
 	WantChanges []string `json:"want_changes,omitempty"`
 }
 
-type advertiseResp struct {
+type AdvertiseResp struct {
 	Repo    string       `json:"repo"`
 	Changes []string     `json:"changes"`
 	Refs    []*store.Ref `json:"refs"`
 }
 
-type server struct {
+// Server is the VCS protocol handler. It is scope-free; callers supply the
+// central store and an optional token set.
+type Server struct {
 	cs     *store.CentralStore
 	tokens map[string]bool
 }
 
-func main() {
-	addr := flag.String("addr", ":8996", "listen address")
-	flag.Parse()
-
-	cs, err := store.OpenDriver(store.DriverConfig{
-		Kind: envOr("EASYVCS_DB_DRIVER", store.KindSQLite),
-		DSN:  envOr("EASYVCS_DB_DSN", ""),
-	})
-	if err != nil {
-		log.Fatal("open store:", err)
+// New builds a Server over the given central store. tokens is a set of accepted
+// bearer tokens; an empty set means write is open (auth disabled).
+func New(cs *store.CentralStore, tokens map[string]bool) *Server {
+	if tokens == nil {
+		tokens = map[string]bool{}
 	}
-	if err := cs.SetWAL(); err != nil {
-		log.Fatal("enable WAL:", err)
-	}
-	s := &server{cs: cs, tokens: buildTokenSet()}
-
-	protocols := new(http.Protocols)
-	protocols.SetHTTP1(true)
-	protocols.SetUnencryptedHTTP2(true)
-	httpSrv := &http.Server{Addr: *addr, Handler: s.router(), Protocols: protocols}
-	log.Printf("easyvcs-server listening on %s (db %s)", *addr, store.DBPath())
-	log.Fatal(httpSrv.ListenAndServe())
+	return &Server{cs: cs, tokens: tokens}
 }
 
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
+// Handler returns the HTTP router for this server. It may be mounted directly
+// (e.g. http.Server{Handler: s.Handler()} or embedded in a larger mux).
+func (s *Server) Handler() http.Handler {
+	return s.router()
 }
 
-func buildTokenSet() map[string]bool {
-	set := map[string]bool{}
-	if env := os.Getenv("EASYVCS_TOKEN"); env != "" {
-		for _, t := range strings.Split(env, ",") {
-			t = strings.TrimSpace(t)
-			if t != "" {
-				set[t] = true
-			}
-		}
-	}
-	return set
-}
+// Router returns the *http.ServeMux (same as Handler but typed).
+func (s *Server) Router() *http.ServeMux { return s.router() }
 
-func (s *server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.authOK(r) {
 			writeErr(w, http.StatusUnauthorized, fmt.Errorf("unauthorized: missing or invalid token"))
@@ -104,7 +76,7 @@ func (s *server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (s *server) authOK(r *http.Request) bool {
+func (s *Server) authOK(r *http.Request) bool {
 	if len(s.tokens) == 0 {
 		return true // open server (CLI default)
 	}
@@ -124,7 +96,7 @@ func (s *server) authOK(r *http.Request) bool {
 	return false
 }
 
-func (s *server) router() *http.ServeMux {
+func (s *Server) router() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /repo/{ns}/{name}/advertise", s.handleAdvertise)
 	mux.HandleFunc("POST /repo/{ns}/{name}/fetch", s.handleFetch)
@@ -132,7 +104,7 @@ func (s *server) router() *http.ServeMux {
 	return mux
 }
 
-func (s *server) repo(w http.ResponseWriter, r *http.Request) (*store.Repo, bool) {
+func (s *Server) repo(w http.ResponseWriter, r *http.Request) (*store.Repo, bool) {
 	repo, err := s.cs.OpenRepo(store.RepoRef{Namespace: r.PathValue("ns"), Name: r.PathValue("name")})
 	if err != nil {
 		writeErr(w, http.StatusNotFound, err)
@@ -141,7 +113,7 @@ func (s *server) repo(w http.ResponseWriter, r *http.Request) (*store.Repo, bool
 	return repo, true
 }
 
-func (s *server) handleAdvertise(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleAdvertise(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.repo(w, r)
 	if !ok {
 		return
@@ -160,15 +132,15 @@ func (s *server) handleAdvertise(w http.ResponseWriter, r *http.Request) {
 	for _, c := range changes {
 		ids = append(ids, c.ID)
 	}
-	writeJSON(w, http.StatusOK, advertiseResp{Repo: repo.String(), Changes: ids, Refs: refs})
+	writeJSON(w, http.StatusOK, AdvertiseResp{Repo: repo.String(), Changes: ids, Refs: refs})
 }
 
-func (s *server) handleFetch(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.repo(w, r)
 	if !ok {
 		return
 	}
-	req, err := decodeJSONBody[advertiseReq](r)
+	req, err := decodeJSONBody[AdvertiseReq](r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -186,12 +158,12 @@ func (s *server) handleFetch(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.WantChanges) > 0 {
 		wanted := changeSetWithAncestors(repo, req.WantChanges, req.Have)
-		b = filterBundle(b, wanted)
+		b = transfer.FilterBundleWant(b, wanted)
 	}
 	writeBundle(w, b)
 }
 
-func (s *server) handlePush(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.repo(w, r)
 	if !ok {
 		return
@@ -202,15 +174,15 @@ func (s *server) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Reject a non-fast-forward update: compare the server's current refs to
-	// the incoming bundle's refs. The client carries its expectation in
-	// ExpectedRefs, but the authoritative check is server-side against the store.
+	// the incoming bundle's refs. The authoritative check is server-side against
+	// the store (the bundle carries the incoming objects needed to resolve a
+	// fast-forward whose tip is not yet in the repo).
 	serverRefs, err := repo.ListRefs()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	conflicts := transfer.CheckNonFastForward(repo, serverRefs, b.Refs, b)
-	_ = b.ExpectedRefs // the authoritative ancestry check uses the store
 	if len(conflicts) > 0 {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error":            "non-fast-forward",
@@ -225,31 +197,6 @@ func (s *server) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"applied": n, "repo": repo.String()})
-}
-
-// filterBundle keeps only revisions reachable from the wanted set.
-func filterBundle(b *transfer.Bundle, wanted map[string]bool) *transfer.Bundle {
-	if len(wanted) == 0 {
-		return b
-	}
-	kept := make([]*store.Revision, 0, len(b.Revisions))
-	keptSnapshots := make([]*store.Snapshot, 0, len(b.Snapshots))
-	snapByRev := map[string]*store.Snapshot{}
-	for _, sn := range b.Snapshots {
-		snapByRev[sn.RevisionID] = sn
-	}
-	for _, ch := range b.Revisions {
-		if !wanted[ch.ID] {
-			continue
-		}
-		kept = append(kept, ch)
-		if sn, ok := snapByRev[ch.ID]; ok {
-			keptSnapshots = append(keptSnapshots, sn)
-		}
-	}
-	out := &transfer.Bundle{Version: b.Version, Repo: b.Repo, Objects: b.Objects,
-		Revisions: kept, Snapshots: keptSnapshots, Refs: b.Refs}
-	return out
 }
 
 func changeSetWithAncestors(repo *store.Repo, wants []string, have []string) map[string]bool {
@@ -347,3 +294,4 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 func writeErr(w http.ResponseWriter, code int, err error) {
 	writeJSON(w, code, map[string]any{"error": err.Error()})
 }
+

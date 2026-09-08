@@ -1056,7 +1056,9 @@ func cmdTag(c *ctx) {
 		fmt.Fprintln(os.Stderr, "usage: tag <name> <revision>")
 		os.Exit(1)
 	}
-	r, err := revision.NewWorkspace(repo).SetRef(os.Args[2], store.RefTag, os.Args[3])
+	ws := revision.NewWorkspace(repo)
+	// A tag is immutable: re-tagging an existing name is rejected by SetRef.
+	r, err := ws.SetRef(os.Args[2], store.RefTag, os.Args[3])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tag:", err)
 		os.Exit(1)

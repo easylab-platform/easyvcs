@@ -51,7 +51,15 @@ easyvcs refs / rev <expr>
 
 ```
 CGO_ENABLED=0 go build -o easyvcs ./cmd/easyvcs
+CGO_ENABLED=0 go build -o easyvcs-server ./cmd/server
 ```
+
+## Packages
+
+- `server` — the authoritative VCS protocol server (advertise / fetch / push,
+  bearer-token auth, non-fast-forward guard). It is a reusable library
+  (`server.New(cs, tokens)` / `Handler()`) so easylab can embed it, with a thin
+  executable wrapper in `cmd/server`.
 
 ## Module
 

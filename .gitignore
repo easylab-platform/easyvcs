@@ -7,3 +7,4 @@
 # go
 go.work.sum
 /easyvcs-server
+/cmd/server/server

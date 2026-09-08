@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"bytes"
@@ -13,7 +13,7 @@ import (
 	"github.com/easylab-platform/easyvcs/transfer"
 )
 
-func newTestServer(t *testing.T, token string) *server {
+func newTestServer(t *testing.T, token string) *Server {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("EASYVCS_HOME", home)
@@ -28,10 +28,10 @@ func newTestServer(t *testing.T, token string) *server {
 	if token != "" {
 		tokens[token] = true
 	}
-	return &server{cs: cs, tokens: tokens}
+	return New(cs, tokens)
 }
 
-func seedRepo(t *testing.T, s *server) {
+func seedRepo(t *testing.T, s *Server) {
 	t.Helper()
 	repo, err := s.cs.Create(store.RepoRef{Namespace: "team", Name: "app"})
 	if err != nil {
@@ -54,7 +54,7 @@ func seedRepo(t *testing.T, s *server) {
 func TestAdvertiseAndFetch(t *testing.T) {
 	s := newTestServer(t, "")
 	seedRepo(t, s)
-	mux := s.router()
+	mux := s.Router()
 
 	// advertise
 	rec := httptest.NewRecorder()
@@ -63,7 +63,7 @@ func TestAdvertiseAndFetch(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("advertise: %d %s", rec.Code, rec.Body.String())
 	}
-	var adv advertiseResp
+	var adv AdvertiseResp
 	_ = json.Unmarshal(rec.Body.Bytes(), &adv)
 	if len(adv.Changes) == 0 || len(adv.Refs) == 0 {
 		t.Fatalf("advertise empty: %+v", adv)
@@ -88,7 +88,7 @@ func TestAdvertiseAndFetch(t *testing.T) {
 func TestPushDisallowsNonFastForward(t *testing.T) {
 	s := newTestServer(t, "")
 	seedRepo(t, s)
-	mux := s.router()
+	mux := s.Router()
 
 	repo, _ := s.cs.OpenRepo(store.RepoRef{Namespace: "team", Name: "app"})
 	revs, _ := repo.ListRevisions()
@@ -144,7 +144,7 @@ func TestPushFastForwardAllowed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(payload))
 	req.Header.Set("Content-Encoding", "gzip")
 	rec := httptest.NewRecorder()
-	s.router().ServeHTTP(rec, req)
+	s.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("fast-forward push should be 200, got %d %s", rec.Code, rec.Body.String())
 	}
@@ -167,7 +167,7 @@ func TestPushAuthRequired(t *testing.T) {
 			req.Header.Set("Authorization", "Bearer "+auth)
 		}
 		rec := httptest.NewRecorder()
-		s.router().ServeHTTP(rec, req)
+		s.Router().ServeHTTP(rec, req)
 		return rec.Code
 	}
 	if code := send(""); code != http.StatusUnauthorized {
@@ -186,18 +186,18 @@ func TestPushAuthRequired(t *testing.T) {
 func TestEndToEndMockPushFetch(t *testing.T) {
 	s := newTestServer(t, "")
 	seedRepo(t, s)
-	srv := httptest.NewServer(s.router())
+	srv := httptest.NewServer(s.Router())
 	defer srv.Close()
 
 	// The server store has the repo (team/app) with revisions rev1/rev2 and main
 	// -> rev1. A "remote" client that already has rev1 should, on advertise, see
 	// rev2 as the missing delta.
-	advertise := func() advertiseResp {
+	advertise := func() AdvertiseResp {
 		body := []byte(`{"have":["missing-none"]}`)
 		req := httptest.NewRequest(http.MethodPost, "/repo/team/app/advertise", bytes.NewReader(body))
 		rec := httptest.NewRecorder()
-		s.router().ServeHTTP(rec, req)
-		var adv advertiseResp
+		s.Router().ServeHTTP(rec, req)
+		var adv AdvertiseResp
 		_ = json.Unmarshal(rec.Body.Bytes(), &adv)
 		return adv
 	}
@@ -237,7 +237,7 @@ func TestEndToEndMockPushFetch(t *testing.T) {
 	fetchReq := []byte(`{}`)
 	frec := httptest.NewRecorder()
 	freq := httptest.NewRequest(http.MethodPost, "/repo/team/app/fetch", bytes.NewReader(fetchReq))
-	s.router().ServeHTTP(frec, freq)
+	s.Router().ServeHTTP(frec, freq)
 	if frec.Code != http.StatusOK {
 		t.Fatalf("fetch: %d %s", frec.Code, frec.Body.String())
 	}

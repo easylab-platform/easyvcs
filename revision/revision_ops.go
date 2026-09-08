@@ -574,7 +574,15 @@ func (w *Workspace) Squash(childRevisionID string) (*store.Snapshot, *store.Revi
 }
 
 // SetRef creates or updates a branch/tag pointing to a revision.
+//
+// A tag is immutable: creating a tag with a name that already exists returns an
+// error (delete it first via DeleteRef). Branches remain re-pointable.
 func (w *Workspace) SetRef(name string, kind store.RefKind, revisionID string) (*store.Ref, error) {
+	if kind == store.RefTag {
+		if existing, err := w.store.GetRef(name); err == nil && existing != nil {
+			return nil, fmt.Errorf("tag %q already exists; delete it before re-tagging", name)
+		}
+	}
 	r := &store.Ref{Name: name, Kind: kind, Target: revisionID}
 	if err := w.store.PutRef(r); err != nil {
 		return nil, err
