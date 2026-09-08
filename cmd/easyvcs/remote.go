@@ -111,14 +111,15 @@ func cmdRemote(c *ctx) {
 
 // --- smart protocol: pull / push ---
 
-// remoteClient returns a client that speaks cleartext HTTP/2 (h2c prior
-// knowledge) to the easylab gateway, which serves the Bundle protocol over
-// HTTP/2 only. https:// targets negotiate h2 via ALPN; http:// targets use
-// h2c. HTTP/1.1 is disabled so the gateway's h1-enforcement never has to
-// reject us.
+// remoteClient returns a client that can talk to a remote easylab gateway over
+// both HTTP/1.1 and HTTP/2. For https:// targets it uses TLS + ALPN so it
+// negotiates h2 (or falls back to h1) based on the server; for http:// targets
+// it uses cleartext h2 (h2c prior knowledge) and falls back to h1 if the server
+// only speaks HTTP/1.1. This keeps the client compatible with a broad range of
+// gateways without requiring QUIC/HTTP3.
 func remoteClient() *http.Client {
 	protocols := new(http.Protocols)
-	protocols.SetHTTP1(false)
+	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
 	return &http.Client{Transport: &http.Transport{Protocols: protocols}}
 }

@@ -20,11 +20,21 @@ type upstream struct {
 	hc   *http.Client
 }
 
+// dualStackClient returns an HTTP client that supports both HTTP/1.1 and
+// cleartext HTTP/2 so it can talk to easylab's gateway (h1+h2c) regardless of
+// whether the self URL is http:// or https:// (the latter uses TLS + ALPN).
+func dualStackClient() *http.Client {
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	return &http.Client{Timeout: 20 * time.Second, Transport: &http.Transport{Protocols: protocols}}
+}
+
 func newUpstream(self string) *upstream {
 	if self == "" {
 		self = "http://127.0.0.1:18160"
 	}
-	return &upstream{self: strings.TrimSuffix(self, "/"), hc: &http.Client{Timeout: 20 * time.Second}}
+	return &upstream{self: strings.TrimSuffix(self, "/"), hc: dualStackClient()}
 }
 
 func (u *upstream) get(ctx context.Context, path string, query url.Values) (int, []byte, error) {

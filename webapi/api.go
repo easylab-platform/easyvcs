@@ -297,7 +297,7 @@ func (a *API) buildStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := dualStackClient().Do(req)
 	if err != nil {
 		writeErr(w, err)
 		return
