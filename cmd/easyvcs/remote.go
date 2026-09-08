@@ -832,7 +832,7 @@ func doPushLocal(repo *store.Repo, rem *store.Remote) error {
 	}
 	_ = expected
 	incoming := b.Refs
-	conflicts := transfer.CheckNonFastForward(targetRepo, serverRefs, incoming)
+	conflicts := transfer.CheckNonFastForward(targetRepo, serverRefs, incoming, b)
 	if len(conflicts) > 0 {
 		return &transfer.NonFastForwardError{ConflictingRefs: conflicts, LocalRefs: incoming}
 	}

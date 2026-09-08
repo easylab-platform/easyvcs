@@ -103,11 +103,11 @@ func hashForRevision(repo *store.Repo, idOrPrefix string) (object.ID, error) {
 // it is recorded in the returned conflict list. A nil/empty conflict list means
 // the update is a pure fast-forward (or the branch is new/unchanged).
 //
-// expected comes from what the client believes the server currently holds (the
-// remote refs it saw on the last fetch/pull); it names the same branch targets.
-// repo is used only to resolve ancestry; pass nil to skip the ancestry check
-// (then any change of target is treated as conflicting).
-func CheckNonFastForward(repo *store.Repo, expected []*store.Ref, incoming []*store.Ref) []*store.Ref {
+// The incoming target revision may not be stored in repo yet (it is coming in
+// the bundle), so we additionally accept the incoming bundle's snapshots to
+// resolve the incoming tip's ancestry. reachable uses repo's snapshot graph for
+// revisions it already knows and the bundle's snapshots for new ones.
+func CheckNonFastForward(repo *store.Repo, expected []*store.Ref, incoming []*store.Ref, bundle *Bundle) []*store.Ref {
 	byName := map[string]*store.Ref{}
 	for _, r := range expected {
 		byName[r.Name] = r
@@ -125,7 +125,7 @@ func CheckNonFastForward(repo *store.Repo, expected []*store.Ref, incoming []*st
 			continue // unchanged
 		}
 		if repo != nil {
-			ff, err := IsAncestor(repo, exp.Target, inc.Target)
+			ff, err := isAncestorUnion(repo, bundle, exp.Target, inc.Target)
 			if err == nil && ff {
 				continue // fast-forward: allowed
 			}
@@ -133,4 +133,75 @@ func CheckNonFastForward(repo *store.Repo, expected []*store.Ref, incoming []*st
 		conflicts = append(conflicts, inc)
 	}
 	return conflicts
+}
+
+// isAncestorUnion reports whether revision `a` is an ancestor of (or equal to)
+// `b`, walking a graph that combines the server repo's snapshots with any
+// snapshots carried in the incoming bundle. This handles a fast-forward where
+// the incoming tip object is not yet present in the repo.
+func isAncestorUnion(repo *store.Repo, b *Bundle, a, c string) (bool, error) {
+	if a == "" || c == "" {
+		return false, nil
+	}
+	if a == c {
+		return true, nil
+	}
+	// childHashByParentName: for each known revision id, its snapshot hash.
+	// We can resolve an id to a snapshot hash either from the repo (if present)
+	// or from the bundle's revisions+snapshots.
+	resolveHash := func(id string) (object.ID, bool) {
+		if rev, err := repo.GetRevision(id); err == nil {
+			return rev.Hash, true
+		}
+		if b != nil {
+			for _, rv := range b.Revisions {
+				if rv.ID == id {
+					return rv.Hash, true
+				}
+			}
+		}
+		return object.ID{}, false
+	}
+	snapForHash := func(h object.ID) (*store.Snapshot, bool) {
+		if s, err := repo.GetSnapshot(h); err == nil {
+			return s, true
+		}
+		if b != nil {
+			for _, s := range b.Snapshots {
+				if s.RevisionHash == h {
+					return s, true
+				}
+			}
+		}
+		return nil, false
+	}
+	cHash, ok := resolveHash(c)
+	if !ok {
+		return false, nil
+	}
+	aHash, ok := resolveHash(a)
+	if !ok {
+		return false, nil
+	}
+	// BFS from c snapshot across parents using the union graph.
+	seen := map[object.ID]bool{cHash: true}
+	queue := []object.ID{cHash}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == aHash {
+			return true, nil
+		}
+		snap, ok := snapForHash(cur)
+		if !ok {
+			continue
+		}
+		for _, p := range snap.Parents {
+			if !seen[p] {
+				seen[p] = true
+				queue = append(queue, p)
+			}
+		}
+	}
+	return false, nil
 }

@@ -61,7 +61,7 @@ func TestLocalPushRejectsNonFastForward(t *testing.T) {
 		t.Fatal(err)
 	}
 	bundle, _ := transfer.CollectAll(repoB)
-	conflicts := transfer.CheckNonFastForward(target, serverRefsOf(target), bundle.Refs)
+	conflicts := transfer.CheckNonFastForward(target, serverRefsOf(target), bundle.Refs, bundle)
 	if len(conflicts) == 0 {
 		// The remote main is at cp2 (child of c1 which is ancestor of divRev? no —
 		// divRev's parent is c1, remote main is c2 whose parent is c1. divRev and

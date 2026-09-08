@@ -43,19 +43,19 @@ func TestIsAncestorAndCheckNonFastForward(t *testing.T) {
 		t.Fatal("r3 should not be an ancestor of r1")
 	}
 	// Case: forward r1 -> r3 (fast-forward) should pass.
-	if conflicts := CheckNonFastForward(repo, revRefs(t, repo, [][2]string{{"main", "r1"}}), revRefs(t, repo, [][2]string{{"main", "r3"}})); len(conflicts) != 0 {
+	if conflicts := CheckNonFastForward(repo, revRefs(t, repo, [][2]string{{"main", "r1"}}), revRefs(t, repo, [][2]string{{"main", "r3"}}), nil); len(conflicts) != 0 {
 		t.Fatalf("expected fast-forward allowed, conflicts=%v", conflicts)
 	}
 	// Case: going backwards r3 -> r1 (non-fast-forward) should be rejected.
-	if conflicts := CheckNonFastForward(repo, revRefs(t, repo, [][2]string{{"main", "r3"}}), revRefs(t, repo, [][2]string{{"main", "r1"}})); len(conflicts) != 1 {
+	if conflicts := CheckNonFastForward(repo, revRefs(t, repo, [][2]string{{"main", "r3"}}), revRefs(t, repo, [][2]string{{"main", "r1"}}), nil); len(conflicts) != 1 {
 		t.Fatalf("expected 1 non-fast-forward conflict, got %v", conflicts)
 	}
 	// Case: unchanged ref -> no conflict.
-	if conflicts := CheckNonFastForward(repo, revRefs(t, repo, [][2]string{{"main", "r3"}}), revRefs(t, repo, [][2]string{{"main", "r3"}})); len(conflicts) != 0 {
+	if conflicts := CheckNonFastForward(repo, revRefs(t, repo, [][2]string{{"main", "r3"}}), revRefs(t, repo, [][2]string{{"main", "r3"}}), nil); len(conflicts) != 0 {
 		t.Fatalf("expected no conflict for unchanged")
 	}
 	// Case: new branch -> no conflict.
-	if conflicts := CheckNonFastForward(repo, revRefs(t, repo, [][2]string{{"main", "r3"}}), revRefs(t, repo, [][2]string{{"feature", "r1"}})); len(conflicts) != 0 {
+	if conflicts := CheckNonFastForward(repo, revRefs(t, repo, [][2]string{{"main", "r3"}}), revRefs(t, repo, [][2]string{{"feature", "r1"}}), nil); len(conflicts) != 0 {
 		t.Fatalf("expected no conflict for new branch")
 	}
 }

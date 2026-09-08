@@ -207,7 +207,7 @@ func (s *server) handlePush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	conflicts := transfer.CheckNonFastForward(repo, serverRefs, b.Refs)
+	conflicts := transfer.CheckNonFastForward(repo, serverRefs, b.Refs, b)
 	_ = b.ExpectedRefs // the authoritative ancestry check uses the store
 	if len(conflicts) > 0 {
 		writeJSON(w, http.StatusConflict, map[string]any{

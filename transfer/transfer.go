@@ -165,6 +165,34 @@ func CompressBundle(b *Bundle) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// FilterBundleWant returns a new Bundle that keeps only the revisions whose id
+// is in `wanted` (and their snapshots). It is used by server-side selective
+// fetch when a client requests specific revisions. A nil/empty wanted set is a
+// no-op (returns the bundle unchanged).
+func FilterBundleWant(b *Bundle, wanted map[string]bool) *Bundle {
+	if len(wanted) == 0 {
+		return b
+	}
+	snapByRev := map[string]*store.Snapshot{}
+	for _, s := range b.Snapshots {
+		snapByRev[s.RevisionID] = s
+	}
+	keptRev := make([]*store.Revision, 0, len(b.Revisions))
+	keptSnap := make([]*store.Snapshot, 0, len(b.Snapshots))
+	for _, r := range b.Revisions {
+		if !wanted[r.ID] {
+			continue
+		}
+		keptRev = append(keptRev, r)
+		if s, ok := snapByRev[r.ID]; ok {
+			keptSnap = append(keptSnap, s)
+		}
+	}
+	out := &Bundle{Version: b.Version, Repo: b.Repo, Objects: b.Objects,
+		Revisions: keptRev, Snapshots: keptSnap, Refs: b.Refs, ExpectedRefs: b.ExpectedRefs}
+	return out
+}
+
 // Collector collects reachable objects from a repository.
 type Collector interface {
 	Repo() *store.Repo

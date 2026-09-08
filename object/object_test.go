@@ -213,3 +213,19 @@ func TestHexStringFull(t *testing.T) {
 		t.Fatal("String should match hex.EncodeToString")
 	}
 }
+
+func TestEncodeTreeBytesRoundTrip(t *testing.T) {
+	tree := NewTree()
+	tree.Entries["a.txt"] = Entry{Name: "a.txt", Kind: KindBlob, ID: BlobID([]byte("a"))}
+	tree.Entries["dir"] = Entry{Name: "dir", Kind: KindTree, ID: BlobID([]byte("d"))}
+	payload := EncodeTreeBytes(tree)
+	dec := DecodeTreeBytes(payload[len(treeMagic):])
+	if len(dec.Entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(dec.Entries))
+	}
+	if dec.Entries["a.txt"].Kind != KindBlob || dec.Entries["dir"].Kind != KindTree {
+		t.Fatalf("entry kinds lost: %+v", dec.Entries)
+	}
+	// Truncated payload decodes safely (returns partial tree, no panic).
+	_ = DecodeTreeBytes(payload[3:])
+}
