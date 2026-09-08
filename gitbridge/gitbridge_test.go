@@ -115,3 +115,15 @@ func TestImportIntoFreshRepoGeneratesNewIDs(t *testing.T) {
 		t.Fatalf("fresh repo should generate a NEW id, not reuse header id %s", r1.ID)
 	}
 }
+
+func TestIsScpLike(t *testing.T) {
+	if !isScpLike("git@github.com:org/repo.git") {
+		t.Fatal("should be scp-like")
+	}
+	if isScpLike("https://github.com/org/repo.git") {
+		t.Fatal("https is not scp-like")
+	}
+	if isScpLike("/local/path") {
+		t.Fatal("local path is not scp-like")
+	}
+}

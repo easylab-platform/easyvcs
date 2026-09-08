@@ -10,15 +10,10 @@ import (
 )
 
 func cmdGitPull(c *ctx) {
-	gitURLOrDir := gitArg()
+	gitURLOrDir, branch, token, sshKey, pass := parseGitArgs("git-pull", true)
 	if gitURLOrDir == "" {
-		fmt.Fprintln(os.Stderr, "usage: git-pull <git-repo-or-url> [BRANCH]")
+		fmt.Fprintln(os.Stderr, "usage: git-pull <git-repo-or-url> [BRANCH] [--token <t>] [--ssh-key <file>] [--passphrase <p>]")
 		os.Exit(1)
-	}
-	branch := "main"
-	args := os.Args[2:]
-	if len(args) > 1 {
-		branch = args[1]
 	}
 	repo, marker, err := c.loadRepo()
 	if err != nil {
@@ -31,7 +26,7 @@ func cmdGitPull(c *ctx) {
 	// when it matches a known revision, otherwise generate a new id — jj-style
 	// weak traceability).
 	revIDs, err := gitbridge.ImportBranch(ws, repo, gitbridge.ImportOptions{
-		Source: gitURLOrDir, Branch: branch,
+		Source: gitURLOrDir, Branch: branch, Token: token, SSHKey: sshKey, SSHKeyPassphrase: pass,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "git-pull:", err)
@@ -67,15 +62,10 @@ func cmdGitPull(c *ctx) {
 }
 
 func cmdGitPush(c *ctx) {
-	gitDest := gitArg()
+	gitDest, branch, token, sshKey, pass := parseGitArgs("git-push", true)
 	if gitDest == "" {
-		fmt.Fprintln(os.Stderr, "usage: git-push <git-repo-or-url> [BRANCH]")
+		fmt.Fprintln(os.Stderr, "usage: git-push <git-repo-or-url> [BRANCH] [--token <t>] [--ssh-key <file>] [--passphrase <p>]")
 		os.Exit(1)
-	}
-	branch := "main"
-	args := os.Args[2:]
-	if len(args) > 1 {
-		branch = args[1]
 	}
 	repo, marker, err := c.loadRepo()
 	if err != nil {
@@ -128,10 +118,62 @@ func cmdGitPush(c *ctx) {
 	shas, err := gitbridge.ExportRevisions(ws, repo, gitbridge.PushOptions{
 		Dest: gitDest, Branch: branch, Revisions: chain,
 		Author: store.Author{Name: "easyvcs", Email: "easyvcs@example.com"},
+		Token:  token, SSHKey: sshKey, SSHKeyPassphrase: pass,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "git-push:", err)
 		os.Exit(1)
 	}
 	fmt.Printf("pushed %d revision(s) to git %s (branch %s)\n", len(shas), gitDest, branch)
+}
+
+// parseGitArgs walks args after the URL and returns (url, branch, token,
+// sshKey, passphrase). It supports "<url> [branch]" plus --token/--ssh-key/
+// --passphrase. When allowBranch is true and no branch is given the default is
+// "main".
+func parseGitArgs(cmd string, allowBranch bool) (url, branch, token, sshKey, pass string) {
+	args := os.Args[2:]
+	branch = "main"
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		// flags consume a following value; skip both.
+		if isGitFlag(a) {
+			i++
+			continue
+		}
+		if url == "" {
+			url = a
+		} else if allowBranch && branch == "main" {
+			branch = a
+		}
+	}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--token", "-token":
+			if i+1 < len(args) {
+				token = args[i+1]
+				i++
+			}
+		case "--ssh-key", "-ssh-key":
+			if i+1 < len(args) {
+				sshKey = args[i+1]
+				i++
+			}
+		case "--passphrase", "-passphrase":
+			if i+1 < len(args) {
+				pass = args[i+1]
+				i++
+			}
+		}
+	}
+	return
+}
+
+// isGitFlag reports whether an arg is one of the gitbridge auth flags.
+func isGitFlag(a string) bool {
+	switch a {
+	case "--token", "-token", "--ssh-key", "-ssh-key", "--passphrase", "-passphrase":
+		return true
+	}
+	return false
 }

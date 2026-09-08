@@ -1,6 +1,7 @@
 package gitbridge
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
@@ -8,7 +9,9 @@ import (
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	gitobject "github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
+	gitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 
 	evobject "github.com/easylab-platform/easyvcs/object"
 	"github.com/easylab-platform/easyvcs/revision"
@@ -33,7 +36,12 @@ type PushOptions struct {
 	Revisions []string
 	Author    store.Author
 	Token     string
-	Squash    bool
+	// SSHKey, when set (a path to a PEM private key), authenticates ssh:// and
+	// git@host remotes via public key. When empty, an SSH agent is used.
+	SSHKey string
+	// SSHKeyPassphrase, if the SSHKey is encrypted.
+	SSHKeyPassphrase string
+	Squash           bool
 }
 
 // ImportOptions configures a pull.
@@ -41,6 +49,10 @@ type ImportOptions struct {
 	Source string
 	Branch string
 	Token  string
+	// SSHKey, when set, authenticates ssh:// and git@host remotes via a PEM key.
+	SSHKey string
+	// SSHKeyPassphrase, if the SSHKey is encrypted.
+	SSHKeyPassphrase string
 }
 
 // ExportRevisions writes the revisions to dest as git commits on Branch and
@@ -137,9 +149,11 @@ func ImportBranch(ws *revision.Workspace, repo *store.Repo, opts ImportOptions) 
 	defer os.RemoveAll(dir)
 
 	co := &git.CloneOptions{URL: opts.Source}
-	if opts.Token != "" {
-		co.Auth = &http.BasicAuth{Username: "token", Password: opts.Token}
+	auth, err := authFor(opts.Source, opts.Token, opts.SSHKey, opts.SSHKeyPassphrase)
+	if err != nil {
+		return nil, err
 	}
+	co.Auth = auth
 	g, err := git.PlainClone(dir, false, co)
 	if err != nil {
 		return nil, err
@@ -268,14 +282,64 @@ func importOneCommit(ws *revision.Workspace, repo *store.Repo, opts ImportOption
 
 func pushBranch(g *git.Repository, opts PushOptions) error {
 	refName := plumbing.NewBranchReferenceName(opts.Branch)
+	auth, err := authFor(opts.Dest, opts.Token, opts.SSHKey, opts.SSHKeyPassphrase)
+	if err != nil {
+		return err
+	}
 	if err := g.Push(&git.PushOptions{
 		RemoteName: "origin",
 		RefSpecs:   []config.RefSpec{config.RefSpec(refName.String() + ":" + refName.String())},
 		Force:      true,
+		Auth:       auth,
 	}); err != nil {
 		return err
 	}
 	return nil
+}
+
+// authFor returns a go-git transport AuthMethod for the given URL. HTTPS uses a
+// token/password BasicAuth; SSH (ssh:// or scp-style git@host) uses either a
+// PEM private key (SSHKey) or an SSH agent. Anonymous/local URLs need none.
+func authFor(url, token, sshKey, passphrase string) (transport.AuthMethod, error) {
+	if isLocalPath(url) {
+		return nil, nil
+	}
+	if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
+		if token == "" {
+			return nil, nil // anonymous public HTTPS
+		}
+		return &githttp.BasicAuth{Username: "token", Password: token}, nil
+	}
+	// SSH: ssh:// or scp-style git@host:path.
+	if strings.HasPrefix(url, "ssh://") || strings.HasPrefix(url, "git@") || isScpLike(url) {
+		if sshKey != "" {
+			key, err := gitssh.NewPublicKeysFromFile("git", sshKey, passphrase)
+			if err != nil {
+				return nil, err
+			}
+			return key, nil
+		}
+		if agent, err := gitssh.NewSSHAgentAuth("git"); err == nil {
+			return agent, nil
+		}
+		return nil, fmt.Errorf("ssh remote requires a key (set --ssh-key) or an ssh-agent")
+	}
+	return nil, nil
+}
+
+// isScpLike reports whether a string is an SCP-style remote (user@host:path)
+// that has no "scheme://".
+func isScpLike(s string) bool {
+	if strings.Contains(s, "://") {
+		return false
+	}
+	// has a '@' and a ':' before any '/'
+	at := strings.Index(s, "@")
+	if at <= 0 {
+		return false
+	}
+	colon := strings.Index(s[at:], ":")
+	return colon > 0
 }
 
 func clearDir(dir string) error {
