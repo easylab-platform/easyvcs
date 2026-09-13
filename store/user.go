@@ -78,6 +78,54 @@ func (s *CentralStore) SetAgentToken(tenantID int64, token string) error {
 	return s.d.gdb.Model(&tenantRow{}).Where("id=?", tenantID).Update("agent_token", token).Error
 }
 
+// UpdateTenant patches display name / disabled state.
+func (s *CentralStore) UpdateTenant(id int64, displayName *string, disabled *bool) (*Tenant, error) {
+	updates := map[string]any{}
+	if displayName != nil {
+		updates["display_name"] = *displayName
+	}
+	if disabled != nil {
+		updates["disabled"] = *disabled
+	}
+	if len(updates) > 0 {
+		if err := s.d.gdb.Model(&tenantRow{}).Where("id=?", id).Updates(updates).Error; err != nil {
+			return nil, err
+		}
+	}
+	return s.GetTenant(id)
+}
+
+// ListUsersByTenant returns every user of one tenant, ordered by username.
+func (s *CentralStore) ListUsersByTenant(tid int64) ([]*User, error) {
+	var rows []userRow
+	if err := s.d.gdb.Where("tenant_id=?", tid).Order("username").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]*User, 0, len(rows))
+	for i := range rows {
+		out = append(out, &User{ID: rows[i].ID, TenantID: rows[i].TenantID, Username: rows[i].Username, DisplayName: rows[i].DisplayName, Created: time.UnixMilli(rows[i].Created)})
+	}
+	return out, nil
+}
+
+// StrongestRoleOfUser returns the highest role a user holds in any namespace
+// of their tenant ("" when they hold none). Used as the tenant-level role
+// projection while tenant members are modeled via namespace membership.
+func (s *CentralStore) StrongestRoleOfUser(userID int64) string {
+	var rows []namespaceMemberRow
+	if err := s.d.gdb.Where("user_id=?", userID).Find(&rows).Error; err != nil {
+		return ""
+	}
+	rank := map[string]int{RoleReadonly: 1, RoleMember: 2, RoleAdmin: 3, RoleOwner: 4}
+	best, bestRank := "", 0
+	for _, r := range rows {
+		if rank[r.Role] > bestRank {
+			best, bestRank = r.Role, rank[r.Role]
+		}
+	}
+	return best
+}
+
 // ListTenants returns all tenants ordered by slug.
 func (s *CentralStore) ListTenants() ([]*Tenant, error) {
 	var rows []tenantRow
