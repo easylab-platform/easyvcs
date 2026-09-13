@@ -241,7 +241,7 @@ func allModels() []any {
 		&refRow{}, &workspaceRow{}, &remoteRow{}, &remoteRefRow{},
 		&tenantRow{}, &userRow{}, &tokenRow{}, &namespaceMemberRow{},
 		&mergeRequestRow{}, &mrReviewRow{}, &mrCommentRow{},
-		&gitRevisionLinkRow{}, &branchACLRow{}, &auditLogRow{},
+		&gitRevisionLinkRow{}, &branchACLRow{}, &auditLogRow{}, &packageOwnerRow{},
 	}
 }
 
