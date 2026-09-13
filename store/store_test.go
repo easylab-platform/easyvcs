@@ -59,6 +59,9 @@ func TestCreateOpenDeleteList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Round-trips return the CANONICAL tenant id (0 normalizes to the
+	// default tenant 1 at the store boundary).
+	ref.Tenant = 1
 	if got.RepoRef() != ref {
 		t.Fatal("repo ref mismatch")
 	}

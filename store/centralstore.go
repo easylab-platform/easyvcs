@@ -166,7 +166,7 @@ func (s *CentralStore) Create(r RepoRef) (*Repo, error) {
 	if err := s.d.gdb.Create(row).Error; err != nil {
 		return nil, err
 	}
-	return &Repo{cs: s, repoID: row.ID, Namespace: r.Namespace, Name: r.Name}, nil
+	return &Repo{cs: s, repoID: row.ID, TenantID: row.TenantID, Namespace: r.Namespace, Name: r.Name}, nil
 }
 
 // OpenRepo opens an existing repository. Returns ErrRepoNotFound if missing.
@@ -179,7 +179,7 @@ func (s *CentralStore) OpenRepo(r RepoRef) (*Repo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Repo{cs: s, repoID: row.ID, Namespace: r.Namespace, Name: r.Name}, nil
+	return &Repo{cs: s, repoID: row.ID, TenantID: row.TenantID, Namespace: r.Namespace, Name: r.Name}, nil
 }
 
 // RepoExists reports whether a repository exists.
@@ -769,7 +769,7 @@ func (r *Repo) ListRefs() ([]*Ref, error) {
 func (r *Repo) Close() error { return nil }
 
 // RepoRef returns the RepoRef for this handle.
-func (r *Repo) RepoRef() RepoRef { return RepoRef{Namespace: r.Namespace, Name: r.Name} }
+func (r *Repo) RepoRef() RepoRef { return RepoRef{Tenant: r.TenantID, Namespace: r.Namespace, Name: r.Name} }
 
 // Remote is a named URL to another EasyVCS server. Token is the optional
 // bearer token used to authenticate writes against that server.

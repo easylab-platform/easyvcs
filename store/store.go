@@ -194,6 +194,7 @@ type RepoStore interface {
 type Repo struct {
 	cs        *CentralStore
 	repoID    int64
+	TenantID  int64
 	Namespace string
 	Name      string
 }
