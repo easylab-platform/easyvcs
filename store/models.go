@@ -121,6 +121,12 @@ type tenantRow struct {
 	DisplayName string `gorm:"not null;default:''"`
 	Disabled    bool   `gorm:"not null;default:false"`
 	Created     int64  `gorm:"not null"`
+	// AgentToken is the tenant's agent.v1 bearer credential (the bootstrap
+	// token minted by the agent's AdminService at tenant creation). The
+	// gateway presents it on every forwarded agent RPC of this tenant. It is
+	// an internal service credential — opaque to lab users — stored as-is so
+	// the gateway can forward it without a secrets service.
+	AgentToken string `gorm:"not null;default:''"`
 }
 
 func (tenantRow) TableName() string { return "tenants" }

@@ -64,6 +64,20 @@ func (s *CentralStore) GetTenantBySlug(slug string) (*Tenant, error) {
 	return &Tenant{ID: row.ID, Slug: row.Slug, DisplayName: row.DisplayName, Disabled: row.Disabled, Created: time.UnixMilli(row.Created)}, nil
 }
 
+// AgentToken returns the tenant's agent credential ("" when unset).
+func (s *CentralStore) AgentToken(tenantID int64) (string, error) {
+	var row tenantRow
+	if err := s.d.gdb.Select("agent_token").First(&row, tenantID).Error; err != nil {
+		return "", err
+	}
+	return row.AgentToken, nil
+}
+
+// SetAgentToken stores the tenant's agent credential.
+func (s *CentralStore) SetAgentToken(tenantID int64, token string) error {
+	return s.d.gdb.Model(&tenantRow{}).Where("id=?", tenantID).Update("agent_token", token).Error
+}
+
 // ListTenants returns all tenants ordered by slug.
 func (s *CentralStore) ListTenants() ([]*Tenant, error) {
 	var rows []tenantRow
