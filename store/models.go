@@ -11,9 +11,12 @@ import (
 // LONGBLOB per dialect. Cross-dialect types (id autoincrement, TIMESTAMP) are
 // handled by GORM.
 
-// repositories table.
+// repositories table. TenantID scopes the (namespace, name) uniqueness: two
+// tenants may each have an "acme/api" repo. The legacy two-column unique
+// index is dropped by the tenant migration (migrateTenants).
 type repoRow struct {
 	ID             int64  `gorm:"primaryKey;autoIncrement"`
+	TenantID       int64  `gorm:"not null;default:1;uniqueIndex:idx_repo"`
 	Namespace      string `gorm:"not null;uniqueIndex:idx_repo"`
 	Name           string `gorm:"not null;uniqueIndex:idx_repo"`
 	Created        int64  `gorm:"not null"`
@@ -108,9 +111,25 @@ type remoteRefRow struct {
 
 // ---- Lab (hosting) entities ----
 
-// users table.
+// tenants table. A tenant is the top-level isolation boundary: it owns orgs
+// (namespaces), repositories, users (1:1) and the matching agent tenant.
+// The row with Slug "default" (id 1) is created by migration and owns all
+// pre-tenancy data.
+type tenantRow struct {
+	ID          int64  `gorm:"primaryKey;autoIncrement"`
+	Slug        string `gorm:"not null;uniqueIndex"`
+	DisplayName string `gorm:"not null;default:''"`
+	Disabled    bool   `gorm:"not null;default:false"`
+	Created     int64  `gorm:"not null"`
+}
+
+func (tenantRow) TableName() string { return "tenants" }
+
+// users table. Users are 1:1 with tenants: a user belongs to exactly one
+// tenant, so the tenant of a request is fully determined by its principal.
 type userRow struct {
 	ID          int64  `gorm:"primaryKey;autoIncrement"`
+	TenantID    int64  `gorm:"not null;default:1;index"`
 	Username    string `gorm:"not null;uniqueIndex"`
 	DisplayName string `gorm:"not null;default:''"`
 	Created     int64  `gorm:"not null"`
@@ -125,8 +144,11 @@ type tokenRow struct {
 	Created int64  `gorm:"not null"`
 }
 
-// namespace_members table.
+// namespace_members table. TenantID mirrors the member user's tenant at
+// insert time, so identically-named namespaces in different tenants never
+// share an ACL row.
 type namespaceMemberRow struct {
+	TenantID  int64  `gorm:"primaryKey;not null;default:1"`
 	Namespace string `gorm:"primaryKey;not null"`
 	UserID    int64  `gorm:"primaryKey;not null"`
 	Role      string `gorm:"not null;default:'member'"`
@@ -217,7 +239,7 @@ func allModels() []any {
 	return []any{
 		&repoRow{}, &pushMirrorRow{}, &objectRow{}, &snapshotRow{}, &revisionRow{},
 		&refRow{}, &workspaceRow{}, &remoteRow{}, &remoteRefRow{},
-		&userRow{}, &tokenRow{}, &namespaceMemberRow{},
+		&tenantRow{}, &userRow{}, &tokenRow{}, &namespaceMemberRow{},
 		&mergeRequestRow{}, &mrReviewRow{}, &mrCommentRow{},
 		&gitRevisionLinkRow{}, &branchACLRow{}, &auditLogRow{},
 	}

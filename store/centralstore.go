@@ -111,7 +111,42 @@ func (s *CentralStore) Init() error {
 	if err := s.cleanupStaleColumns(); err != nil {
 		return err
 	}
-	return s.d.gdb.AutoMigrate(allModels()...)
+	if err := s.d.gdb.AutoMigrate(allModels()...); err != nil {
+		return err
+	}
+	return s.migrateTenants()
+}
+
+// migrateTenants is the one-time tenancy bootstrap. It (1) guarantees the
+// "default" tenant exists with the FIXED id 1 (rows carry tenant_id=1 as the
+// column default, so pre-tenancy data is owned by it), and (2) replaces the
+// legacy two-column unique index on repositories with the tenant-scoped
+// three-column one — AutoMigrate cannot be trusted to re-shape an existing
+// same-named index. Idempotent.
+func (s *CentralStore) migrateTenants() error {
+	var n int64
+	if err := s.d.gdb.Model(&tenantRow{}).Where("id = ?", int64(1)).Count(&n).Error; err != nil {
+		return err
+	}
+	if n == 0 {
+		def := &tenantRow{ID: 1, Slug: "default", DisplayName: "Default", Created: time.Now().UTC().UnixMilli()}
+		if err := s.d.gdb.Create(def).Error; err != nil {
+			return fmt.Errorf("create default tenant: %w", err)
+		}
+	}
+	// Legacy index (namespace, name) blocks same-named orgs across tenants.
+	// Drop it if present; the AutoMigrated idx_repo (tenant_id, namespace,
+	// name) — created after the drop on legacy databases — takes over. On a
+	// fresh database AutoMigrate already created the three-column index, so
+	// this is a no-op.
+	if s.d.gdb.Migrator().HasIndex(&repoRow{}, "idx_repo") {
+		// Rebuild unconditionally: cheap, and guarantees the column set
+		// matches the model regardless of which path created it first.
+		if err := s.d.gdb.Migrator().DropIndex(&repoRow{}, "idx_repo"); err != nil {
+			return fmt.Errorf("drop legacy repo index: %w", err)
+		}
+	}
+	return s.d.gdb.Migrator().CreateIndex(&repoRow{}, "idx_repo")
 }
 
 // Close closes the underlying database.
@@ -121,13 +156,13 @@ func (s *CentralStore) Close() error { return s.d.db.Close() }
 func (s *CentralStore) Create(r RepoRef) (*Repo, error) {
 	// Check for conflict.
 	var count int64
-	if err := s.d.gdb.Model(&repoRow{}).Where("namespace=? AND name=?", r.Namespace, r.Name).Count(&count).Error; err != nil {
+	if err := s.d.gdb.Model(&repoRow{}).Where("tenant_id=? AND namespace=? AND name=?", r.TenantID(), r.Namespace, r.Name).Count(&count).Error; err != nil {
 		return nil, err
 	}
 	if count > 0 {
 		return nil, fmt.Errorf("%w: %s", ErrRepoExists, r)
 	}
-	row := &repoRow{Namespace: r.Namespace, Name: r.Name, Created: time.Now().UTC().UnixMilli()}
+	row := &repoRow{TenantID: r.TenantID(), Namespace: r.Namespace, Name: r.Name, Created: time.Now().UTC().UnixMilli()}
 	if err := s.d.gdb.Create(row).Error; err != nil {
 		return nil, err
 	}
@@ -137,7 +172,7 @@ func (s *CentralStore) Create(r RepoRef) (*Repo, error) {
 // OpenRepo opens an existing repository. Returns ErrRepoNotFound if missing.
 func (s *CentralStore) OpenRepo(r RepoRef) (*Repo, error) {
 	var row repoRow
-	err := s.d.gdb.Where("namespace=? AND name=?", r.Namespace, r.Name).First(&row).Error
+	err := s.d.gdb.Where("tenant_id=? AND namespace=? AND name=?", r.TenantID(), r.Namespace, r.Name).First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, fmt.Errorf("%w: %s", ErrRepoNotFound, r)
 	}
@@ -150,7 +185,7 @@ func (s *CentralStore) OpenRepo(r RepoRef) (*Repo, error) {
 // RepoExists reports whether a repository exists.
 func (s *CentralStore) RepoExists(r RepoRef) (bool, error) {
 	var count int64
-	if err := s.d.gdb.Model(&repoRow{}).Where("namespace=? AND name=?", r.Namespace, r.Name).Count(&count).Error; err != nil {
+	if err := s.d.gdb.Model(&repoRow{}).Where("tenant_id=? AND namespace=? AND name=?", r.TenantID(), r.Namespace, r.Name).Count(&count).Error; err != nil {
 		return false, err
 	}
 	return count > 0, nil
@@ -183,6 +218,19 @@ func (s *CentralStore) Delete(r RepoRef) error {
 }
 
 // List returns all repositories sorted by namespace/name.
+// ListForTenant returns every repository of one tenant.
+func (s *CentralStore) ListForTenant(tid int64) ([]RepoRef, error) {
+	var rows []repoRow
+	if err := s.d.gdb.Where("tenant_id=?", tid).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	refs := make([]RepoRef, 0, len(rows))
+	for _, row := range rows {
+		refs = append(refs, RepoRef{Tenant: row.TenantID, Namespace: row.Namespace, Name: row.Name})
+	}
+	return refs, nil
+}
+
 func (s *CentralStore) List() ([]RepoRef, error) {
 	var rows []repoRow
 	if err := s.d.gdb.Order("namespace, name").Find(&rows).Error; err != nil {
@@ -190,7 +238,7 @@ func (s *CentralStore) List() ([]RepoRef, error) {
 	}
 	out := make([]RepoRef, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, RepoRef{Namespace: r.Namespace, Name: r.Name})
+		out = append(out, RepoRef{Tenant: r.TenantID, Namespace: r.Namespace, Name: r.Name})
 	}
 	return out, nil
 }

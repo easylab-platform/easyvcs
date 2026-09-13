@@ -55,13 +55,24 @@ func SnapshotHashFor(s *Snapshot) object.ID {
 	return object.BlobID([]byte(b.String()))
 }
 
-// RepoRef uniquely identifies a repository within the central store.
+// RepoRef uniquely identifies a repository within the central store. Tenant
+// scopes the (namespace, name) pair: 0 means the default tenant (id 1), which
+// keeps every pre-tenancy call site behaving exactly as before.
 type RepoRef struct {
+	Tenant    int64
 	Namespace string
 	Name      string
 }
 
 func (r RepoRef) String() string { return r.Namespace + "/" + r.Name }
+
+// TenantID resolves the effective tenant id (0 → default tenant 1).
+func (r RepoRef) TenantID() int64 {
+	if r.Tenant == 0 {
+		return 1
+	}
+	return r.Tenant
+}
 
 // Author is a named identity.
 type Author struct {

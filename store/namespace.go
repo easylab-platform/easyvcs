@@ -34,23 +34,51 @@ func validRole(role string) bool {
 }
 
 // AddNamespaceMember grants a user membership in a namespace with a role.
+// The row's tenant is taken from the USER (users are 1:1 tenants), which also
+// pins the membership to that tenant's namespace of the same name.
 func (s *CentralStore) AddNamespaceMember(namespace string, userID int64, role string) error {
 	if !validRole(role) {
 		return fmt.Errorf("invalid role %q (readonly|member|admin|owner)", role)
 	}
-	row := &namespaceMemberRow{Namespace: namespace, UserID: userID, Role: role}
+	tid, err := s.tenantOfUser(userID)
+	if err != nil {
+		return err
+	}
+	row := &namespaceMemberRow{TenantID: tid, Namespace: namespace, UserID: userID, Role: role}
 	return s.d.gdb.Clauses(clause.OnConflict{UpdateAll: true}).Create(row).Error
 }
 
-// RemoveNamespaceMember revokes a user's membership in a namespace.
+// tenantOfUser resolves the tenant a user belongs to (default tenant for
+// legacy rows).
+func (s *CentralStore) tenantOfUser(userID int64) (int64, error) {
+	var u userRow
+	if err := s.d.gdb.Select("tenant_id").First(&u, userID).Error; err != nil {
+		return 1, err
+	}
+	if u.TenantID == 0 {
+		return 1, nil
+	}
+	return u.TenantID, nil
+}
+
+// RemoveNamespaceMember revokes a user's membership in a namespace (scoped
+// to the user's tenant).
 func (s *CentralStore) RemoveNamespaceMember(namespace string, userID int64) error {
-	return s.d.gdb.Where("namespace=? AND user_id=?", namespace, userID).Delete(&namespaceMemberRow{}).Error
+	tid, err := s.tenantOfUser(userID)
+	if err != nil {
+		return err
+	}
+	return s.d.gdb.Where("tenant_id=? AND namespace=? AND user_id=?", tid, namespace, userID).Delete(&namespaceMemberRow{}).Error
 }
 
 // GetNamespaceMember returns a user's membership in a namespace.
 func (s *CentralStore) GetNamespaceMember(namespace string, userID int64) (*NamespaceMember, error) {
+	tid, err := s.tenantOfUser(userID)
+	if err != nil {
+		return nil, err
+	}
 	var row namespaceMemberRow
-	err := s.d.gdb.Where("namespace=? AND user_id=?", namespace, userID).First(&row).Error
+	err = s.d.gdb.Where("tenant_id=? AND namespace=? AND user_id=?", tid, namespace, userID).First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
@@ -61,9 +89,15 @@ func (s *CentralStore) GetNamespaceMember(namespace string, userID int64) (*Name
 }
 
 // ListNamespaceMembers lists members of a namespace.
+// ListNamespaceMembers lists members of a namespace within one tenant.
 func (s *CentralStore) ListNamespaceMembers(namespace string) ([]*NamespaceMember, error) {
+	return s.ListNamespaceMembersTenant(1, namespace)
+}
+
+// ListNamespaceMembersTenant is the tenant-scoped form.
+func (s *CentralStore) ListNamespaceMembersTenant(tid int64, namespace string) ([]*NamespaceMember, error) {
 	var rows []namespaceMemberRow
-	if err := s.d.gdb.Where("namespace=?", namespace).Order("user_id").Find(&rows).Error; err != nil {
+	if err := s.d.gdb.Where("tenant_id=? AND namespace=?", tid, namespace).Order("user_id").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]*NamespaceMember, 0, len(rows))
@@ -89,8 +123,12 @@ func (s *CentralStore) ListUserNamespaces(userID int64) ([]*NamespaceMember, err
 // IsNamespaceMember reports whether a user belongs to a namespace, regardless of
 // role. The user has read access to that namespace's private repositories.
 func (s *CentralStore) IsNamespaceMember(namespace string, userID int64) bool {
+	tid, err := s.tenantOfUser(userID)
+	if err != nil {
+		return false
+	}
 	var count int64
-	s.d.gdb.Model(&namespaceMemberRow{}).Where("namespace=? AND user_id=?", namespace, userID).Count(&count)
+	s.d.gdb.Model(&namespaceMemberRow{}).Where("tenant_id=? AND namespace=? AND user_id=?", tid, namespace, userID).Count(&count)
 	return count > 0
 }
 
@@ -118,7 +156,18 @@ func (s *CentralStore) UserCanReadRepo(r RepoRef, userID *int64) bool {
 		}
 		return false
 	}
-	return s.IsNamespaceMember(r.Namespace, *userID)
+	return s.userInRepoTenant(*userID, r) && s.IsNamespaceMember(r.Namespace, *userID)
+}
+
+// userInRepoTenant reports whether the user belongs to the repo's tenant.
+// Users are 1:1 tenants, so a membership row in an identically-named namespace
+// of ANOTHER tenant must never grant access.
+func (s *CentralStore) userInRepoTenant(userID int64, r RepoRef) bool {
+	tid, err := s.tenantOfUser(userID)
+	if err != nil {
+		return false
+	}
+	return tid == r.TenantID()
 }
 
 // instanceIsOpen reports whether no users are registered, i.e. a fresh
@@ -163,6 +212,9 @@ func (s *CentralStore) UserCanWriteRepo(r RepoRef, userID *int64) bool {
 		return true
 	}
 	if userID == nil {
+		return false
+	}
+	if !s.userInRepoTenant(*userID, r) {
 		return false
 	}
 	m, err := s.GetNamespaceMember(r.Namespace, *userID)
