@@ -17,9 +17,10 @@ import (
 // TestPushToEmptyServerNoDanglingRefs reproduces the CLI bug where pushing to
 // an empty server sent refs without revisions: every ref target must resolve.
 func TestPushToEmptyServerNoDanglingRefs(t *testing.T) {
-	s := newTestServer(t, "")
-	// Server store exists but has NO repo yet; create it empty.
-	if _, err := s.cs.Create(store.RepoRef{Namespace: "team", Name: "app"}); err != nil {
+	s := newTestServer(t, "secret")
+	// Server store exists but has NO repo yet; create it empty (owned by tester).
+	tester, _ := s.cs.GetUserByUsername("tester")
+	if _, err := s.cs.Create(store.RepoRef{Owner: tester.ID, Namespace: "team", Name: "app"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -45,6 +46,7 @@ func TestPushToEmptyServerNoDanglingRefs(t *testing.T) {
 	payload, _ := transfer.CompressBundle(b)
 	req := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(payload))
 	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
 	s.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -121,18 +123,19 @@ func TestPrivateRepoTokenPull(t *testing.T) {
 	}
 }
 
-// TestReadonlyRoleDeniedWrite verifies a readonly namespace member cannot push.
-func TestReadonlyRoleDeniedWrite(t *testing.T) {
+// TestNonOwnerPushDenied verifies a user with no grant on a repo cannot push.
+func TestNonOwnerPushDenied(t *testing.T) {
 	s := newTestServer(t, "secret")
 	seedRepo(t, s)
-	// Downgrade the tester to readonly.
-	u, err := s.cs.GetUserByUsername("tester")
+	// A second user with no role on team/app.
+	intruder, err := s.cs.CreateUser("intruder", "Intruder")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.cs.AddNamespaceMember("team", u.ID, "readonly"); err != nil {
+	if _, err := s.cs.CreateToken("intruder-token", intruder.ID, "write"); err != nil {
 		t.Fatal(err)
 	}
+
 	repo, _ := s.cs.OpenRepo(store.RepoRef{Namespace: "team", Name: "app"})
 	revs, _ := repo.ListRevisions()
 	b := &transfer.Bundle{Version: transfer.Version, Repo: repo.RepoRef(), Revisions: revs,
@@ -141,16 +144,38 @@ func TestReadonlyRoleDeniedWrite(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(payload))
 	req.Header.Set("Content-Encoding", "gzip")
 	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Authorization", "Bearer intruder-token")
 	rec := httptest.NewRecorder()
 	s.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("readonly member push should be 403, got %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("non-owner push should be 403, got %d %s", rec.Code, rec.Body.String())
 	}
 }
 
-// TestReadLevelTokenDeniedWrite verifies a read-level token cannot push even
-// for a write-capable member.
-func TestReadLevelTokenDeniedWrite(t *testing.T) {
+// TestOwnerCanPush verifies the namespace owner can push.
+func TestOwnerCanPush(t *testing.T) {
+	s := newTestServer(t, "secret")
+	seedRepo(t, s)
+	repo, _ := s.cs.OpenRepo(store.RepoRef{Namespace: "team", Name: "app"})
+	revs, _ := repo.ListRevisions()
+	b := &transfer.Bundle{Version: transfer.Version, Repo: repo.RepoRef(), Revisions: revs,
+		Refs: []*store.Ref{{Name: "main", Kind: store.RefBranch, Target: revs[0].ID}}}
+	payload, _ := transfer.CompressBundle(b)
+	req := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(payload))
+	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	s.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("owner push should be 200, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestReadLevelTokenStillPushesAsOwner verifies token level no longer gates
+// authorization (the ROLE does): a read-level token held by the owner is
+// accepted, since authorization is role-based, not token-level.
+func TestReadLevelTokenStillPushesAsOwner(t *testing.T) {
 	s := newTestServer(t, "secret")
 	seedRepo(t, s)
 	u, _ := s.cs.GetUserByUsername("tester")
@@ -164,17 +189,18 @@ func TestReadLevelTokenDeniedWrite(t *testing.T) {
 	payload, _ := transfer.CompressBundle(b)
 	req := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(payload))
 	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Authorization", "Bearer secret")
 	req.Header.Set("Authorization", "Bearer reader")
 	rec := httptest.NewRecorder()
 	s.Router().ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("read-level token push should be 403, got %d %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("owner with read-level token should push (role-based), got %d %s", rec.Code, rec.Body.String())
 	}
 }
 
 // TestMirrorRepoRejectsPush verifies read-only mirror repos reject pushes.
 func TestMirrorRepoRejectsPush(t *testing.T) {
-	s := newTestServer(t, "")
+	s := newTestServer(t, "secret")
 	seedRepo(t, s)
 	repo, _ := s.cs.OpenRepo(store.RepoRef{Namespace: "team", Name: "app"})
 	if err := repo.UpdateMirrorMeta(store.RepoMeta{Kind: "mirror"}); err != nil {
@@ -189,6 +215,7 @@ func TestMirrorRepoRejectsPush(t *testing.T) {
 	payload, _ := transfer.CompressBundle(b)
 	req := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(payload))
 	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
 	s.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
@@ -198,7 +225,7 @@ func TestMirrorRepoRejectsPush(t *testing.T) {
 
 // TestPushBodyLimit verifies oversized request bodies are rejected with 413.
 func TestPushBodyLimit(t *testing.T) {
-	s := newTestServer(t, "")
+	s := newTestServer(t, "secret")
 	seedRepo(t, s)
 	s.SetMaxBody(1024)
 
@@ -207,6 +234,7 @@ func TestPushBodyLimit(t *testing.T) {
 	// MaxBytesReader trips mid-read.
 	big := bytes.Repeat([]byte(" "), 8192)
 	req := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(big))
+	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
 	s.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusRequestEntityTooLarge {
@@ -219,7 +247,7 @@ func TestPushBodyLimit(t *testing.T) {
 // and must itself be a fast-forward) or one is rejected — but the store must
 // never end up with a dangling ref or interleaved partial state.
 func TestConcurrentPushOneFastForward(t *testing.T) {
-	s := newTestServer(t, "")
+	s := newTestServer(t, "secret")
 	seedRepo(t, s)
 	repo, _ := s.cs.OpenRepo(store.RepoRef{Namespace: "team", Name: "app"})
 	revs, _ := repo.ListRevisions()
@@ -242,6 +270,7 @@ func TestConcurrentPushOneFastForward(t *testing.T) {
 			defer wg.Done()
 			req := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(payload))
 			req.Header.Set("Content-Encoding", "gzip")
+			req.Header.Set("Authorization", "Bearer secret")
 			rec := httptest.NewRecorder()
 			s.Router().ServeHTTP(rec, req)
 			codes[i] = rec.Code

@@ -4,48 +4,28 @@ import (
 	"testing"
 )
 
-// TestBranchACL verifies the branch allowlist semantics: with no rows the repo
-// role applies (all branches allowed); once a row exists, only listed branches
-// are pushable.
-func TestBranchACL(t *testing.T) {
-	cs := newTestCentral(t)
-	repo, _ := cs.Create(RepoRef{Namespace: "n", Name: "r"})
-	user := int64(7)
+// TestRoleCapabilities verifies the capability thresholds on the three
+// repository roles.
+func TestRoleCapabilities(t *testing.T) {
+	owner := RoleOwner
+	maintainer := Role(RoleMaintainer)
+	developer := Role(RoleDeveloper)
+	none := RoleNone
 
-	// No rows (no allowlist in effect) -> can push any branch.
-	ok, err := repo.CanPushBranch(user, "main")
-	if err != nil || !ok {
-		t.Fatalf("no allowlist: main should be allowed, got %v %v", ok, err)
+	if !owner.CanPush() || !owner.CanMerge() || !owner.CanPropose() || !owner.CanRead() || !owner.CanOwnSession() {
+		t.Fatal("owner must have every capability")
 	}
-
-	// Add an allowlist row for "main".
-	if err := repo.AddBranchACL(user, "main"); err != nil {
-		t.Fatal(err)
+	if maintainer.CanPush() || !maintainer.CanMerge() || !maintainer.CanPropose() || !maintainer.CanRead() || maintainer.CanOwnSession() {
+		t.Fatal("maintainer: merge/propose/read yes; push/session no")
 	}
-	// main allowed; dev not allowed.
-	if ok, _ := repo.CanPushBranch(user, "main"); !ok {
-		t.Fatal("main should be allowed when listed")
+	if developer.CanPush() || developer.CanMerge() || !developer.CanPropose() || !developer.CanRead() || developer.CanOwnSession() {
+		t.Fatal("developer: propose/read yes; push/merge/session no")
 	}
-	if ok, _ := repo.CanPushBranch(user, "dev"); ok {
-		t.Fatal("dev should be denied when allowlist active")
+	if none.CanRead() || none.CanPropose() || none.AtLeast(RoleOwner) {
+		t.Fatal("none must grant nothing")
 	}
-
-	// Another user with no rows is unaffected (repo role applies to them).
-	if ok, _ := repo.CanPushBranch(8, "dev"); !ok {
-		t.Fatal("user 8 with no rows falls back to repo-wide write")
-	}
-
-	// List + remove.
-	branches, err := repo.ListBranchACL(user)
-	if err != nil || len(branches) != 1 || branches[0] != "main" {
-		t.Fatalf("list branch acl: %v %v", branches, err)
-	}
-	if err := repo.RemoveBranchACL(user, "main"); err != nil {
-		t.Fatal(err)
-	}
-	// Now no rows -> repo-wide again.
-	if ok, _ := repo.CanPushBranch(user, "dev"); !ok {
-		t.Fatal("after removing rows, repo role should allow dev")
+	if !owner.AtLeast(Role(RoleMaintainer)) || !maintainer.AtLeast(Role(RoleDeveloper)) {
+		t.Fatal("AtLeast ordering broken")
 	}
 }
 
@@ -53,7 +33,8 @@ func TestBranchACL(t *testing.T) {
 // is encrypted at rest but decrypts back, and without a key it is plaintext.
 func TestSecretEncryptionRoundTrip(t *testing.T) {
 	cs := newTestCentral(t)
-	repo, _ := cs.Create(RepoRef{Namespace: "n", Name: "r"})
+	owner, _ := cs.CreateUser("owner", "Owner")
+	repo, _ := cs.Create(RepoRef{Owner: owner.ID, Namespace: "n", Name: "r"})
 
 	// Without a key: plaintext round-trip.
 	_ = repo.PutRemote("origin", "http://x", "tok123")

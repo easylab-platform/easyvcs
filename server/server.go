@@ -145,9 +145,10 @@ func auditEvent(r *http.Request, tk *store.Token) store.AuditEvent {
 }
 
 // authenticate resolves the request's bearer token to a user. It returns the
-// token-level record (with UserID/Level) and true, or (nil,false) for an
-// unauthenticated request. An open instance (no registered users/tokens) allows
-// anonymous access (token=nil, ok=true via instanceIsOpen).
+// token-level record (with UserID) and true when the request may proceed to
+// authorization: an absent credential is ANONYMOUS (token=nil, ok=true) and is
+// authorized separately (read on a public repo; never a write). A malformed or
+// unknown token is rejected outright.
 func (s *Server) authenticate(r *http.Request) (*store.Token, bool) {
 	header := r.Header.Get("Authorization")
 	raw := ""
@@ -155,8 +156,7 @@ func (s *Server) authenticate(r *http.Request) (*store.Token, bool) {
 		raw = strings.TrimPrefix(header, "Bearer ")
 	}
 	if raw == "" {
-		// No credentials: allowed only if the instance is open.
-		return nil, s.cs.IsOpenInstance()
+		return nil, true // anonymous; authorization decides
 	}
 	tk, err := s.cs.LookupToken(raw)
 	if err != nil {
@@ -173,9 +173,41 @@ func userID(tk *store.Token) *int64 {
 	return &tk.UserID
 }
 
-// requireRepoAccess guards a handler with repository read/write ACL. write=false
-// for advertise/fetch; write=true for push. It records an audit event on both
-// allow and deny.
+// userIDVal returns the caller's user id (0 for anonymous).
+func userIDVal(tk *store.Token) int64 {
+	if tk == nil {
+		return 0
+	}
+	return tk.UserID
+}
+
+// canRead reports whether the caller may read the repo. A public repo is
+// readable even anonymously; a private repo requires a role (owner / member) or
+// an open instance (no users at all) for dev/CLI.
+func (s *Server) canRead(rref store.RepoRef, tk *store.Token) bool {
+	role, err := s.cs.RoleOfRef(rref, userIDVal(tk))
+	if err == nil && role.CanRead() {
+		return true
+	}
+	return tk == nil && s.cs.IsOpenInstance()
+}
+
+// canPush reports whether the caller may push to the repo. Writing always
+// requires a credential; on an open instance (no users, legacy CLI) any
+// authenticated-or-anonymous writer is permitted for dev ergonomics — but the
+// production path is owner-only.
+func (s *Server) canPush(rref store.RepoRef, tk *store.Token) bool {
+	role, err := s.cs.RoleOfRef(rref, userIDVal(tk))
+	if err == nil && role.CanPush() {
+		return true
+	}
+	return s.cs.IsOpenInstance()
+}
+
+// requireRepoAccess guards a handler with repository write (push) or read ACL.
+// write=false for advertise/fetch; write=true for push. It records an audit
+// event on both allow and deny. Push is OWNER-only; read is any role (public is
+// readable anonymously).
 func (s *Server) requireRepoAccess(write bool, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Bound the request body to prevent unbounded memory use (413 on
@@ -187,21 +219,20 @@ func (s *Server) requireRepoAccess(write bool, next http.HandlerFunc) http.Handl
 			writeErr(w, http.StatusUnauthorized, fmt.Errorf("unauthorized: missing or invalid token"))
 			return
 		}
-		if write && tk != nil && tk.Level == "read" {
-			s.auditDenied(r, tk, "read-level token")
-			writeErr(w, http.StatusForbidden, fmt.Errorf("forbidden: read-level token cannot write"))
+		if write && tk == nil {
+			// Writing always requires a credential, even on an open instance.
+			s.auditDenied(r, nil, "anonymous write")
+			writeErr(w, http.StatusUnauthorized, fmt.Errorf("unauthorized: write requires a token"))
 			return
 		}
 		rref := store.RepoRef{Namespace: r.PathValue("ns"), Name: r.PathValue("name")}
 		if write {
-			if !s.cs.UserCanWriteRepo(rref, userID(tk)) {
+			if !s.canPush(rref, tk) {
 				s.auditDenied(r, tk, "no write access")
 				writeErr(w, http.StatusForbidden, fmt.Errorf("forbidden: no write access to %s", rref))
 				return
 			}
-			// Branch-level allowlist is enforced in handlePush once the bundle is
-			// decoded (CanPushBranch per ref).
-		} else if !s.cs.UserCanReadRepo(rref, userID(tk)) {
+		} else if !s.canRead(rref, tk) {
 			s.auditDenied(r, tk, "no read access")
 			writeErr(w, http.StatusForbidden, fmt.Errorf("forbidden: no read access to %s", rref))
 			return
@@ -333,26 +364,8 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	// Branch-level allowlist: for each branch being pushed, the user must be
-	// allowed to push it. A user with no branch-ACL rows falls back to the repo
-	// write role (already granted by requireRepoAccess).
-	if tk != nil {
-		for _, rf := range b.Refs {
-			if rf.Kind != store.RefBranch {
-				continue
-			}
-			allowed, aerr := repo.CanPushBranch(tk.UserID, rf.Name)
-			if aerr != nil {
-				writeErr(w, http.StatusBadRequest, aerr)
-				return
-			}
-			if !allowed {
-				s.auditDenied(r, tk, "branch "+rf.Name+" not in allowlist")
-				writeErr(w, http.StatusForbidden, fmt.Errorf("forbidden: branch %s not allowed for this user", rf.Name))
-				return
-			}
-		}
-	}
+	// Push is owner-only (already enforced by requireRepoAccess). There is no
+	// finer-grained branch allowlist: only the owner pushes, to any branch.
 	// Serialize pushes per repo and run the authoritative non-fast-forward
 	// check + transactional apply atomically, so two concurrent pushes cannot
 	// interleave (no TOCTOU) and a failed apply leaves no partial state.

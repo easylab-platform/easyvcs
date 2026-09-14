@@ -8,19 +8,22 @@ import (
 	"gorm.io/gorm"
 )
 
-// MergeRequest models a change-tracking request between two revisions.
+// MergeRequest models a change-tracking request between two revisions. A
+// same-repo MR has SourceRepoID == RepoID; a fork→upstream MR has SourceRepoID
+// pointing at the fork while RepoID is the target (upstream) repository.
 type MergeRequest struct {
-	ID          int64
-	RepoID      int64
-	IID         int64
-	Title       string
-	Description string
-	Source      string // revision id or branch name
-	Target      string // revision id or branch name
-	State       string // "open" | "merged" | "closed"
-	AuthorID    *int64
-	Created     time.Time
-	Updated     time.Time
+	ID           int64
+	RepoID       int64
+	SourceRepoID int64
+	IID          int64
+	Title        string
+	Description  string
+	Source       string // revision id or branch name
+	Target       string // revision id or branch name
+	State        string // "open" | "merged" | "closed"
+	AuthorID     *int64
+	Created      time.Time
+	Updated      time.Time
 }
 
 // Review is a reviewer's verdict on a merge request.
@@ -55,8 +58,12 @@ func (s *CentralStore) CreateMergeRequest(repoID int64, mr *MergeRequest) (*Merg
 	if maxIID != nil {
 		iid = *maxIID
 	}
+	sourceRepoID := mr.SourceRepoID
+	if sourceRepoID == 0 {
+		sourceRepoID = repoID
+	}
 	row := &mergeRequestRow{
-		RepoID: repoID, IID: iid, Title: mr.Title, Description: mr.Description,
+		RepoID: repoID, SourceRepoID: sourceRepoID, IID: iid, Title: mr.Title, Description: mr.Description,
 		Source: mr.Source, Target: mr.Target, State: mr.State,
 		AuthorID: mr.AuthorID, Created: now, Updated: now,
 	}
@@ -64,7 +71,7 @@ func (s *CentralStore) CreateMergeRequest(repoID int64, mr *MergeRequest) (*Merg
 		return nil, err
 	}
 	return &MergeRequest{
-		ID: row.ID, RepoID: repoID, IID: iid, Title: mr.Title, Description: mr.Description,
+		ID: row.ID, RepoID: repoID, SourceRepoID: sourceRepoID, IID: iid, Title: mr.Title, Description: mr.Description,
 		Source: mr.Source, Target: mr.Target, State: mr.State, AuthorID: mr.AuthorID,
 		Created: time.UnixMilli(now), Updated: time.UnixMilli(now),
 	}, nil
@@ -81,7 +88,7 @@ func (s *CentralStore) GetMergeRequest(repoID, iid int64) (*MergeRequest, error)
 		return nil, err
 	}
 	return &MergeRequest{
-		ID: row.ID, RepoID: row.RepoID, IID: row.IID, Title: row.Title, Description: row.Description,
+		ID: row.ID, RepoID: row.RepoID, SourceRepoID: row.SourceRepoID, IID: row.IID, Title: row.Title, Description: row.Description,
 		Source: row.Source, Target: row.Target, State: row.State, AuthorID: row.AuthorID,
 		Created: time.UnixMilli(row.Created), Updated: time.UnixMilli(row.Updated),
 	}, nil
@@ -100,7 +107,7 @@ func (s *CentralStore) ListMergeRequests(repoID int64, state string) ([]*MergeRe
 	out := make([]*MergeRequest, 0, len(rows))
 	for i := range rows {
 		out = append(out, &MergeRequest{
-			ID: rows[i].ID, RepoID: rows[i].RepoID, IID: rows[i].IID, Title: rows[i].Title,
+			ID: rows[i].ID, RepoID: rows[i].RepoID, SourceRepoID: rows[i].SourceRepoID, IID: rows[i].IID, Title: rows[i].Title,
 			Description: rows[i].Description, Source: rows[i].Source, Target: rows[i].Target,
 			State: rows[i].State, AuthorID: rows[i].AuthorID,
 			Created: time.UnixMilli(rows[i].Created), Updated: time.UnixMilli(rows[i].Updated),

@@ -150,7 +150,7 @@ func (s *CentralStore) AllMirrors() ([]*Repo, RepoMetaMap, error) {
 	repos := make([]*Repo, 0, len(rows))
 	meta := RepoMetaMap{}
 	for i := range rows {
-		repos = append(repos, &Repo{cs: s, repoID: rows[i].ID, TenantID: rows[i].TenantID, Namespace: rows[i].Namespace, Name: rows[i].Name})
+		repos = append(repos, &Repo{cs: s, repoID: rows[i].ID, OwnerUserID: rows[i].OwnerUserID, Namespace: rows[i].Namespace, Name: rows[i].Name})
 		dec, err := decryptSecret(rows[i].MirrorToken)
 		if err != nil {
 			return nil, nil, fmt.Errorf("mirror %s/%s: %w", rows[i].Namespace, rows[i].Name, err)

@@ -7,210 +7,19 @@ import (
 	"gorm.io/gorm"
 )
 
-// User is a Lab account. A user owns namespaces (orgs) and repositories.
-// Users are 1:1 with tenants: TenantID pins every credential to exactly one
-// isolation boundary (0 = default tenant 1 for legacy rows).
+// User is both the identity and the ownership boundary. There is no separate
+// tenant: a user owns namespaces (and therefore repositories), holds tokens,
+// and is bound to one abcp-agent tenant. Username is globally unique.
 type User struct {
 	ID          int64
-	TenantID    int64
 	Username    string
 	DisplayName string
-	Created     time.Time
-}
-
-// Tenant is the top-level isolation boundary (orgs, repos, users, and the
-// matching agent tenant all belong to one).
-type Tenant struct {
-	ID          int64
-	Slug        string
-	DisplayName string
 	Disabled    bool
-	Created     time.Time
 	// AgentTenant / AgentToken are the explicit binding to the abcp-agent
 	// tenant (see the row comment in models.go).
 	AgentTenant string
 	AgentToken  string
-}
-
-// CreateTenant inserts a tenant. The slug must be unique.
-func (s *CentralStore) CreateTenant(slug, displayName string) (*Tenant, error) {
-	now := time.Now().UTC().UnixMilli()
-	row := &tenantRow{Slug: slug, DisplayName: displayName, Created: now}
-	if err := s.d.gdb.Create(row).Error; err != nil {
-		return nil, err
-	}
-	return &Tenant{ID: row.ID, Slug: slug, DisplayName: displayName, Created: time.UnixMilli(now)}, nil
-}
-
-// GetTenant returns a tenant by id.
-func (s *CentralStore) GetTenant(id int64) (*Tenant, error) {
-	var row tenantRow
-	err := s.d.gdb.Where("id=?", id).First(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return tenantFromRow(&row), nil
-}
-
-// GetTenantBySlug returns a tenant by slug.
-func (s *CentralStore) GetTenantBySlug(slug string) (*Tenant, error) {
-	var row tenantRow
-	err := s.d.gdb.Where("slug=?", slug).First(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return tenantFromRow(&row), nil
-}
-
-func tenantFromRow(row *tenantRow) *Tenant {
-	return &Tenant{
-		ID: row.ID, Slug: row.Slug, DisplayName: row.DisplayName,
-		Disabled: row.Disabled, Created: time.UnixMilli(row.Created),
-		AgentTenant: row.AgentTenant, AgentToken: row.AgentToken,
-	}
-}
-
-// AgentToken returns the tenant's agent credential ("" when unset).
-func (s *CentralStore) AgentToken(tenantID int64) (string, error) {
-	var row tenantRow
-	if err := s.d.gdb.Select("agent_token").First(&row, tenantID).Error; err != nil {
-		return "", err
-	}
-	return row.AgentToken, nil
-}
-
-// AgentBinding returns the tenant's bound agent tenant id + credential.
-func (s *CentralStore) AgentBinding(tenantID int64) (agentTenant, agentToken string, err error) {
-	var row tenantRow
-	if err := s.d.gdb.Select("agent_tenant", "agent_token").First(&row, tenantID).Error; err != nil {
-		return "", "", err
-	}
-	return row.AgentTenant, row.AgentToken, nil
-}
-
-// SetAgentBinding stores the tenant's bound agent tenant id + credential
-// (empty values are ignored, so a partial update never clears the other).
-func (s *CentralStore) SetAgentBinding(tenantID int64, agentTenant, agentToken string) error {
-	updates := map[string]any{}
-	if agentTenant != "" {
-		updates["agent_tenant"] = agentTenant
-	}
-	if agentToken != "" {
-		updates["agent_token"] = agentToken
-	}
-	if len(updates) == 0 {
-		return nil
-	}
-	return s.d.gdb.Model(&tenantRow{}).Where("id=?", tenantID).Updates(updates).Error
-}
-
-// UpdateTenant patches display name / disabled state.
-func (s *CentralStore) UpdateTenant(id int64, displayName *string, disabled *bool) (*Tenant, error) {
-	updates := map[string]any{}
-	if displayName != nil {
-		updates["display_name"] = *displayName
-	}
-	if disabled != nil {
-		updates["disabled"] = *disabled
-	}
-	if len(updates) > 0 {
-		if err := s.d.gdb.Model(&tenantRow{}).Where("id=?", id).Updates(updates).Error; err != nil {
-			return nil, err
-		}
-	}
-	return s.GetTenant(id)
-}
-
-// ListUsersByTenant returns every user of one tenant, ordered by username.
-func (s *CentralStore) ListUsersByTenant(tid int64) ([]*User, error) {
-	var rows []userRow
-	if err := s.d.gdb.Where("tenant_id=?", tid).Order("username").Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	out := make([]*User, 0, len(rows))
-	for i := range rows {
-		out = append(out, &User{ID: rows[i].ID, TenantID: rows[i].TenantID, Username: rows[i].Username, DisplayName: rows[i].DisplayName, Created: time.UnixMilli(rows[i].Created)})
-	}
-	return out, nil
-}
-
-// StrongestRoleOfUser returns the highest role a user holds in any namespace
-// of their tenant ("" when they hold none). Used as the tenant-level role
-// projection while tenant members are modeled via namespace membership.
-func (s *CentralStore) StrongestRoleOfUser(userID int64) string {
-	var rows []namespaceMemberRow
-	if err := s.d.gdb.Where("user_id=?", userID).Find(&rows).Error; err != nil {
-		return ""
-	}
-	rank := map[string]int{RoleReadonly: 1, RoleMember: 2, RoleAdmin: 3, RoleOwner: 4}
-	best, bestRank := "", 0
-	for _, r := range rows {
-		if rank[r.Role] > bestRank {
-			best, bestRank = r.Role, rank[r.Role]
-		}
-	}
-	return best
-}
-
-// ListTenants returns all tenants ordered by slug.
-func (s *CentralStore) ListTenants() ([]*Tenant, error) {
-	var rows []tenantRow
-	if err := s.d.gdb.Order("slug").Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	out := make([]*Tenant, 0, len(rows))
-	for i := range rows {
-		out = append(out, tenantFromRow(&rows[i]))
-	}
-	return out, nil
-}
-
-// DeleteTenant removes a tenant and every row scoped to it: its repositories
-// (with their metadata), users, tokens, namespace memberships, and package
-// ownership claims. The default tenant (id 1) is protected. The caller is
-// responsible for cascading to the agent (AdminService.DeleteTenant).
-func (s *CentralStore) DeleteTenant(id int64) error {
-	if id == 0 || id == 1 {
-		return errors.New("store: the default tenant cannot be deleted")
-	}
-	t, err := s.GetTenant(id)
-	if err != nil {
-		return err
-	}
-	refs, err := s.ListForTenant(t.ID)
-	if err != nil {
-		return err
-	}
-	for _, r := range refs {
-		if err := s.Delete(r); err != nil {
-			return err
-		}
-	}
-	var users []userRow
-	if err := s.d.gdb.Where("tenant_id=?", id).Find(&users).Error; err != nil {
-		return err
-	}
-	for _, u := range users {
-		if err := s.d.gdb.Where("user_id=?", u.ID).Delete(&tokenRow{}).Error; err != nil {
-			return err
-		}
-	}
-	if err := s.d.gdb.Where("tenant_id=?", id).Delete(&namespaceMemberRow{}).Error; err != nil {
-		return err
-	}
-	if err := s.d.gdb.Where("tenant_id=?", id).Delete(&userRow{}).Error; err != nil {
-		return err
-	}
-	if err := s.d.gdb.Where("tenant_id=?", id).Delete(&packageOwnerRow{}).Error; err != nil {
-		return err
-	}
-	return s.d.gdb.Delete(&tenantRow{}, id).Error
+	Created     time.Time
 }
 
 // ErrUsernameTaken is returned when creating a user that already exists.
@@ -220,24 +29,15 @@ var ErrUsernameTaken = errors.New("store: username already exists")
 var ErrTokenNotFound = errors.New("store: token not found")
 
 // CreateUser inserts a new user. Creating the first user closes the instance
-// (anonymous access stops being allowed). TenantID 0 pins the user to the
-// default tenant.
+// (anonymous access stops being allowed).
 func (s *CentralStore) CreateUser(username, displayName string) (*User, error) {
-	return s.CreateUserTenant(0, username, displayName)
-}
-
-// CreateUserTenant is the tenant-explicit form.
-func (s *CentralStore) CreateUserTenant(tid int64, username, displayName string) (*User, error) {
-	if tid == 0 {
-		tid = 1
-	}
 	now := time.Now().UTC().UnixMilli()
-	row := &userRow{TenantID: tid, Username: username, DisplayName: displayName, Created: now}
+	row := &userRow{Username: username, DisplayName: displayName, Created: now}
 	if err := s.d.gdb.Create(row).Error; err != nil {
 		return nil, err
 	}
 	s.invalidateOpenCache()
-	return &User{ID: row.ID, TenantID: tid, Username: username, DisplayName: displayName, Created: time.UnixMilli(now)}, nil
+	return userFromRow(row), nil
 }
 
 // GetUser returns a user by id.
@@ -250,7 +50,7 @@ func (s *CentralStore) GetUser(id int64) (*User, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &User{ID: row.ID, TenantID: row.TenantID, Username: row.Username, DisplayName: row.DisplayName, Created: time.UnixMilli(row.Created)}, nil
+	return userFromRow(&row), nil
 }
 
 // GetUserByUsername returns a user by username.
@@ -263,7 +63,7 @@ func (s *CentralStore) GetUserByUsername(username string) (*User, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &User{ID: row.ID, TenantID: row.TenantID, Username: row.Username, DisplayName: row.DisplayName, Created: time.UnixMilli(row.Created)}, nil
+	return userFromRow(&row), nil
 }
 
 // ListUsers returns all users ordered by username.
@@ -274,7 +74,212 @@ func (s *CentralStore) ListUsers() ([]*User, error) {
 	}
 	out := make([]*User, 0, len(rows))
 	for i := range rows {
-		out = append(out, &User{ID: rows[i].ID, TenantID: rows[i].TenantID, Username: rows[i].Username, DisplayName: rows[i].DisplayName, Created: time.UnixMilli(rows[i].Created)})
+		out = append(out, userFromRow(&rows[i]))
 	}
 	return out, nil
+}
+
+// UpdateUser patches display name / disabled state.
+func (s *CentralStore) UpdateUser(id int64, displayName *string, disabled *bool) (*User, error) {
+	updates := map[string]any{}
+	if displayName != nil {
+		updates["display_name"] = *displayName
+	}
+	if disabled != nil {
+		updates["disabled"] = *disabled
+	}
+	if len(updates) > 0 {
+		if err := s.d.gdb.Model(&userRow{}).Where("id=?", id).Updates(updates).Error; err != nil {
+			return nil, err
+		}
+	}
+	return s.GetUser(id)
+}
+
+// DeleteUser removes a user and every row owned by it: namespaces, repositories
+// (with their metadata), tokens, repo memberships, and package ownership claims.
+func (s *CentralStore) DeleteUser(id int64) error {
+	if _, err := s.GetUser(id); err != nil {
+		return err
+	}
+	refs, err := s.ListForOwner(id)
+	if err != nil {
+		return err
+	}
+	for _, r := range refs {
+		if err := s.Delete(r); err != nil {
+			return err
+		}
+	}
+	// Repo member grants this user holds on OTHER repos.
+	if err := s.d.gdb.Where("user_id=?", id).Delete(&repoMemberRow{}).Error; err != nil {
+		return err
+	}
+	if err := s.d.gdb.Where("user_id=?", id).Delete(&tokenRow{}).Error; err != nil {
+		return err
+	}
+	if err := s.d.gdb.Where("owner_user_id=?", id).Delete(&namespaceRow{}).Error; err != nil {
+		return err
+	}
+	if err := s.d.gdb.Where("owner_user_id=?", id).Delete(&packageOwnerRow{}).Error; err != nil {
+		return err
+	}
+	return s.d.gdb.Delete(&userRow{}, id).Error
+}
+
+// AgentToken returns the user's agent credential ("" when unset).
+func (s *CentralStore) AgentToken(userID int64) (string, error) {
+	var row userRow
+	if err := s.d.gdb.Select("agent_token").First(&row, userID).Error; err != nil {
+		return "", err
+	}
+	return row.AgentToken, nil
+}
+
+// AgentBinding returns the user's bound agent tenant id + credential.
+func (s *CentralStore) AgentBinding(userID int64) (agentTenant, agentToken string, err error) {
+	var row userRow
+	if err := s.d.gdb.Select("agent_tenant", "agent_token").First(&row, userID).Error; err != nil {
+		return "", "", err
+	}
+	return row.AgentTenant, row.AgentToken, nil
+}
+
+// SetAgentBinding stores the user's bound agent tenant id + credential (empty
+// values are ignored, so a partial update never clears the other).
+func (s *CentralStore) SetAgentBinding(userID int64, agentTenant, agentToken string) error {
+	updates := map[string]any{}
+	if agentTenant != "" {
+		updates["agent_tenant"] = agentTenant
+	}
+	if agentToken != "" {
+		updates["agent_token"] = agentToken
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	return s.d.gdb.Model(&userRow{}).Where("id=?", userID).Updates(updates).Error
+}
+
+func userFromRow(row *userRow) *User {
+	return &User{
+		ID: row.ID, Username: row.Username, DisplayName: row.DisplayName,
+		Disabled: row.Disabled, Created: time.UnixMilli(row.Created),
+		AgentTenant: row.AgentTenant, AgentToken: row.AgentToken,
+	}
+}
+
+// ---- namespaces (owned by exactly one user) ----
+
+// Namespace is an org owned by one user. Repositories live under it, so its
+// owner is also the repository owner.
+type Namespace struct {
+	Name        string
+	OwnerUserID int64
+	Created     time.Time
+}
+
+// EnsureNamespace creates the namespace for its owner when absent (idempotent).
+func (s *CentralStore) EnsureNamespace(owner int64, name string) error {
+	return s.ensureNamespaceRow(owner, name)
+}
+
+// OwnerOfNamespace returns the user id owning the namespace (0 when absent).
+func (s *CentralStore) OwnerOfNamespace(name string) (int64, error) {
+	var row namespaceRow
+	err := s.d.gdb.Where("name=?", name).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	return row.OwnerUserID, nil
+}
+
+// ListNamespacesByOwner returns the namespaces owned by a user.
+func (s *CentralStore) ListNamespacesByOwner(owner int64) ([]*Namespace, error) {
+	var rows []namespaceRow
+	if err := s.d.gdb.Where("owner_user_id=?", owner).Order("name").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]*Namespace, 0, len(rows))
+	for i := range rows {
+		out = append(out, &Namespace{Name: rows[i].Name, OwnerUserID: rows[i].OwnerUserID, Created: time.UnixMilli(rows[i].Created)})
+	}
+	return out, nil
+}
+
+// TenantHasNamespace reports whether a user owns a namespace (registry scope
+// evidence: you may publish @org/… only when you own that namespace).
+func (s *CentralStore) TenantHasNamespace(userID int64, namespace string) bool {
+	if userID == 0 {
+		return false
+	}
+	var n int64
+	s.d.gdb.Model(&namespaceRow{}).Where("owner_user_id=? AND name=?", userID, namespace).Count(&n)
+	return n > 0
+}
+
+// ---- per-repository collaborator roles ----
+
+// Repository roles. The owner is derived from the namespace owner and is not
+// stored as a repo_members row; maintainer/developer are explicit grants.
+const (
+	RoleMaintainer = "maintainer"
+	RoleDeveloper  = "developer"
+)
+
+// RepoMember is a user's non-owner role on a repository.
+type RepoMember struct {
+	RepoID int64
+	UserID int64
+	Role   string
+}
+
+// validRepoRole reports whether role is a grantable collaborator role.
+func validRepoRole(role string) bool {
+	return role == RoleMaintainer || role == RoleDeveloper
+}
+
+// SetRepoMember grants or updates a user's role on a repository. Owner cannot
+// be granted here (the owner is the namespace owner).
+func (s *CentralStore) SetRepoMember(repoID, userID int64, role string, grantedBy *int64) error {
+	if !validRepoRole(role) {
+		return errors.New("store: repo role must be maintainer or developer")
+	}
+	row := &repoMemberRow{RepoID: repoID, UserID: userID, Role: role, GrantedBy: grantedBy, Created: time.Now().UTC().UnixMilli()}
+	return s.d.gdb.Clauses(gormConflictUpdateAll()).Create(row).Error
+}
+
+// RemoveRepoMember revokes a user's role on a repository.
+func (s *CentralStore) RemoveRepoMember(repoID, userID int64) error {
+	return s.d.gdb.Where("repo_id=? AND user_id=?", repoID, userID).Delete(&repoMemberRow{}).Error
+}
+
+// ListRepoMembers returns the explicit (non-owner) members of a repository.
+func (s *CentralStore) ListRepoMembers(repoID int64) ([]*RepoMember, error) {
+	var rows []repoMemberRow
+	if err := s.d.gdb.Where("repo_id=?", repoID).Order("user_id").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]*RepoMember, 0, len(rows))
+	for i := range rows {
+		out = append(out, &RepoMember{RepoID: rows[i].RepoID, UserID: rows[i].UserID, Role: rows[i].Role})
+	}
+	return out, nil
+}
+
+// RepoMemberRole returns the explicit role a user holds on a repo ("" when a
+// collaborator grant is absent).
+func (s *CentralStore) RepoMemberRole(repoID, userID int64) (string, error) {
+	var row repoMemberRow
+	err := s.d.gdb.Where("repo_id=? AND user_id=?", repoID, userID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return row.Role, nil
 }

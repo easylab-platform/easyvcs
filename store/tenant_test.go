@@ -19,155 +19,115 @@ func openTenantStore(t *testing.T) *CentralStore {
 	return s
 }
 
-// The migration must guarantee the default tenant with the FIXED id 1 (rows
-// carry tenant_id=1 as their column default).
-func TestTenantDefaultExistsWithFixedID(t *testing.T) {
+// A user owns repositories only under namespaces it owns; two users may each
+// own an identically-named repo, and lookups never cross the boundary.
+func TestRepoIsolationAcrossUsers(t *testing.T) {
 	s := openTenantStore(t)
-	got, err := s.GetTenant(1)
+	alice, err := s.CreateUser("alice", "Alice")
 	if err != nil {
-		t.Fatalf("get tenant 1: %v", err)
+		t.Fatalf("create alice: %v", err)
 	}
-	if got.Slug != "default" {
-		t.Fatalf("tenant 1 slug = %q, want default", got.Slug)
-	}
-	// Idempotent re-run.
-	if err := s.migrateTenants(); err != nil {
-		t.Fatalf("re-run migrateTenants: %v", err)
-	}
-	if n := countTenants(t, s); n != 1 {
-		t.Fatalf("after re-run: %d tenants, want 1", n)
-	}
-}
-
-func countTenants(t *testing.T, s *CentralStore) int {
-	t.Helper()
-	list, err := s.ListTenants()
+	bob, err := s.CreateUser("bob", "Bob")
 	if err != nil {
-		t.Fatalf("list tenants: %v", err)
-	}
-	return len(list)
-}
-
-// Two tenants may each own an identically-named repo; lookups never cross the
-// boundary.
-func TestRepoIsolationAcrossTenants(t *testing.T) {
-	s := openTenantStore(t)
-	other, err := s.CreateTenant("acme", "Acme")
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
+		t.Fatalf("create bob: %v", err)
 	}
 
-	a := RepoRef{Namespace: "platform", Name: "api"}             // default tenant
-	b := RepoRef{Tenant: other.ID, Namespace: "platform", Name: "api"} // acme tenant
+	a := RepoRef{Owner: alice.ID, Namespace: "platform", Name: "api"}
+	b := RepoRef{Owner: bob.ID, Namespace: "platform", Name: "api"}
 
 	if _, err := s.Create(a); err != nil {
-		t.Fatalf("create default/platform/api: %v", err)
+		t.Fatalf("create alice/platform/api: %v", err)
 	}
 	if _, err := s.Create(b); err != nil {
-		t.Fatalf("create acme platform/api (same name in another tenant): %v", err)
+		t.Fatalf("create bob/platform/api (same name, other owner): %v", err)
 	}
 
-	// Zero-value refs stay on the default tenant (legacy call sites).
-	got, err := s.OpenRepo(RepoRef{Namespace: "platform", Name: "api"})
-	if err != nil {
-		t.Fatalf("open default ref: %v", err)
+	// Owner-scoped refs resolve to the right repo.
+	gotA, err := s.OpenRepo(a)
+	if err != nil || gotA.OwnerUserID != alice.ID {
+		t.Fatalf("open alice ref: %v %+v", err, gotA)
 	}
-	if got.Namespace != "platform" || got.Name != "api" {
-		t.Fatalf("opened %+v", got)
-	}
-	// The acme-scoped ref must NOT resolve through the default lens.
-	if _, err := s.OpenRepo(RepoRef{Namespace: "platform", Name: "nope"}); err == nil {
-		t.Fatal("expected not-found for absent repo")
+	gotB, err := s.OpenRepo(b)
+	if err != nil || gotB.OwnerUserID != bob.ID {
+		t.Fatalf("open bob ref: %v %+v", err, gotB)
 	}
 
-	// Exists checks are tenant-scoped.
-	if ok, _ := s.RepoExists(RepoRef{Tenant: other.ID, Namespace: "platform", Name: "api"}); !ok {
-		t.Fatal("acme platform/api should exist")
+	// Per-owner listing never leaks the other's repos.
+	listA, err := s.ListForOwner(alice.ID)
+	if err != nil || len(listA) != 1 {
+		t.Fatalf("alice repos = %+v (%v)", listA, err)
 	}
-
-	// Per-tenant listing never leaks the other tenant's repos.
-	defRepos, err := s.ListForTenant(1)
-	if err != nil {
-		t.Fatalf("list default: %v", err)
-	}
-	if len(defRepos) != 1 || defRepos[0].Namespace != "platform" {
-		t.Fatalf("default tenant repos = %+v", defRepos)
-	}
-	acmeRepos, err := s.ListForTenant(other.ID)
-	if err != nil {
-		t.Fatalf("list acme: %v", err)
-	}
-	if len(acmeRepos) != 1 {
-		t.Fatalf("acme tenant repos = %+v", acmeRepos)
+	listB, err := s.ListForOwner(bob.ID)
+	if err != nil || len(listB) != 1 {
+		t.Fatalf("bob repos = %+v (%v)", listB, err)
 	}
 }
 
-// Deleting one tenant's repo leaves the same-named repo of the other tenant
-// untouched.
-func TestDeleteIsTenantScoped(t *testing.T) {
+// Deleting one user's repo leaves the same-named repo of the other untouched.
+func TestDeleteIsOwnerScoped(t *testing.T) {
 	s := openTenantStore(t)
-	other, _ := s.CreateTenant("t2", "T2")
-	if _, err := s.Create(RepoRef{Namespace: "x", Name: "r"}); err != nil {
+	alice, _ := s.CreateUser("alice", "Alice")
+	bob, _ := s.CreateUser("bob", "Bob")
+	if _, err := s.Create(RepoRef{Owner: alice.ID, Namespace: "x", Name: "r"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Create(RepoRef{Tenant: other.ID, Namespace: "x", Name: "r"}); err != nil {
+	if _, err := s.Create(RepoRef{Owner: bob.ID, Namespace: "x", Name: "r"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Delete(RepoRef{Namespace: "x", Name: "r"}); err != nil {
+	if err := s.Delete(RepoRef{Owner: alice.ID, Namespace: "x", Name: "r"}); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := s.RepoExists(RepoRef{Namespace: "x", Name: "r"}); ok {
-		t.Fatal("default copy should be gone")
+	if ok, _ := s.RepoExists(RepoRef{Owner: alice.ID, Namespace: "x", Name: "r"}); ok {
+		t.Fatal("alice copy should be gone")
 	}
-	if ok, _ := s.RepoExists(RepoRef{Tenant: other.ID, Namespace: "x", Name: "r"}); !ok {
-		t.Fatal("t2 copy must survive")
+	if ok, _ := s.RepoExists(RepoRef{Owner: bob.ID, Namespace: "x", Name: "r"}); !ok {
+		t.Fatal("bob copy must survive")
 	}
 }
 
-// Membership rows are pinned to the member's tenant: an identically-named
-// namespace in another tenant can never grant access.
-func TestNamespaceMembershipIsTenantPinned(t *testing.T) {
+// Collaboration: the owner of a repo may grant a DIFFERENT user a role, and
+// that user's effective role resolves on the owner's repo (cross-user grant).
+func TestRepoMemberRoles(t *testing.T) {
 	s := openTenantStore(t)
-	other, _ := s.CreateTenant("t2", "T2")
+	owner, _ := s.CreateUser("owner", "Owner")
+	maint, _ := s.CreateUser("maint", "Maintainer")
+	dev, _ := s.CreateUser("dev", "Developer")
+	other, _ := s.CreateUser("other", "Other")
 
-	uA, err := s.CreateUser("alice", "Alice") // default tenant
+	repo, err := s.Create(RepoRef{Owner: owner.ID, Namespace: "acme", Name: "api"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddNamespaceMember("acme", uA.ID, RoleMember); err != nil {
+
+	// Owner role comes from namespace ownership.
+	if role, _ := s.RoleOf(repo.RepoID(), owner.ID); !role.CanPush() {
+		t.Fatalf("owner role = %q, want owner", role)
+	}
+	if err := s.SetRepoMember(repo.RepoID(), maint.ID, RoleMaintainer, &owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetRepoMember(repo.RepoID(), dev.ID, RoleDeveloper, &owner.ID); err != nil {
 		t.Fatal(err)
 	}
 
-	// alice's membership row lives in the default tenant only: the same
-	// namespace name under t2 must not consider her a member.
-	if s.IsNamespaceMember("acme", uA.ID) != true {
-		t.Fatal("alice should be member in her own tenant")
+	if role, _ := s.RoleOf(repo.RepoID(), maint.ID); role.CanPush() || !role.CanMerge() {
+		t.Fatalf("maintainer role = %q (push=%v merge=%v)", role, role.CanPush(), role.CanMerge())
 	}
-	// Membership lookup is via the user's tenant, so a repo of tenant t2
-	// named acme/x resolves membership through t2 rows — none exist.
-	got, err := s.GetNamespaceMember("acme", uA.ID)
-	if err != nil || got.Role != RoleMember {
-		t.Fatalf("get membership: %v %+v", err, got)
+	if role, _ := s.RoleOf(repo.RepoID(), dev.ID); role.CanMerge() || !role.CanPropose() {
+		t.Fatalf("developer role = %q (merge=%v propose=%v)", role, role.CanMerge(), role.CanPropose())
 	}
-
-	// A t2 user gets their own, separate membership row for the same name.
-	uB, err := s.CreateUserTenant(other.ID, "bob", "Bob")
-	if err != nil {
-		t.Fatal(err)
+	// A private repo with no grant: no role.
+	repo.UpdateRepoMeta(RepoMeta{Visibility: "private"})
+	if role, _ := s.RoleOf(repo.RepoID(), other.ID); role != RoleNone {
+		t.Fatalf("non-member on private repo = %q, want none", role)
 	}
-	if uB.TenantID != other.ID {
-		t.Fatalf("bob tenant = %d, want %d", uB.TenantID, other.ID)
+	// Public exposes developer-equivalent access.
+	repo.UpdateRepoMeta(RepoMeta{Visibility: "public"})
+	if role, _ := s.RoleOf(repo.RepoID(), other.ID); !role.CanRead() {
+		t.Fatalf("public repo should be readable, got %q", role)
 	}
-	if err := s.AddNamespaceMember("acme", uB.ID, RoleAdmin); err != nil {
-		t.Fatal(err)
-	}
-	// Write ACLs: bob (admin in t2) can write t2's acme repo, NOT the default
-	// tenant's acme repo (his membership row is tenant-pinned).
-	uid := uB.ID
-	if !s.UserCanWriteRepo(RepoRef{Tenant: other.ID, Namespace: "acme", Name: "r"}, &uid) {
-		t.Fatal("bob should write t2/acme")
-	}
-	if s.UserCanWriteRepo(RepoRef{Namespace: "acme", Name: "r"}, &uid) {
-		t.Fatal("bob must NOT write default/acme via a same-named namespace")
+	// Anonymous on a public repo reads.
+	if role, _ := s.RoleOf(repo.RepoID(), 0); !role.CanRead() || role.CanPush() {
+		t.Fatalf("anonymous public role = %q", role)
 	}
 }

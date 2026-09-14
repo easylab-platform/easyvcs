@@ -9,41 +9,28 @@ import (
 	"gorm.io/gorm"
 )
 
-// Package ownership (artifact registry tenancy).
+// Package ownership (artifact registry).
 //
 // The registry keeps ONE global namespace per format (npm-official model):
-// names are globally unique, every name belongs to exactly one tenant, and
-// visibility is a per-name flag (public by default; private = owning tenant
+// names are globally unique, every name belongs to exactly one user, and
+// visibility is a per-name flag (public by default; private = owning user
 // only). Rows are created on first publish — the "claim".
 
 // PackageOwner is the ownership record of one registry name.
 type PackageOwner struct {
-	Format     string
-	Repository string
-	TenantID   int64
-	Visibility string // "public" | "private"
-	Created    time.Time
+	Format      string
+	Repository  string
+	OwnerUserID int64
+	Visibility  string // "public" | "private"
+	Created     time.Time
 }
 
-// packageOwnerRow is the GORM model. (format, repository) is globally
-// unique — that uniqueness IS the global-namespace contract.
-type packageOwnerRow struct {
-	ID         int64  `gorm:"primaryKey;autoIncrement"`
-	Format     string `gorm:"not null;uniqueIndex:idx_pkgowner"`
-	Repository string `gorm:"not null;uniqueIndex:idx_pkgowner"`
-	TenantID   int64  `gorm:"not null;default:1"`
-	Visibility string `gorm:"not null;default:'public'"`
-	Created    int64  `gorm:"not null"`
-}
-
-func (packageOwnerRow) TableName() string { return "package_owners" }
-
-// ErrPackageOwned is returned when another tenant owns the name.
-var ErrPackageOwned = errors.New("store: package belongs to another tenant")
+// ErrPackageOwned is returned when another user owns the name.
+var ErrPackageOwned = errors.New("store: package belongs to another user")
 
 // ErrScopeNotYours is returned when the npm-style scope (@org/…) has no org
-// evidence in the caller's tenant.
-var ErrScopeNotYours = errors.New("store: scope does not belong to your tenant (create the org/repo first)")
+// evidence in the caller's namespaces.
+var ErrScopeNotYours = errors.New("store: scope does not belong to you (create the namespace/repo first)")
 
 // GetPackageOwner returns the ownership record of a name, or ErrNotFound.
 func (s *CentralStore) GetPackageOwner(format, repository string) (*PackageOwner, error) {
@@ -55,13 +42,13 @@ func (s *CentralStore) GetPackageOwner(format, repository string) (*PackageOwner
 	if err != nil {
 		return nil, err
 	}
-	return &PackageOwner{Format: row.Format, Repository: row.Repository, TenantID: row.TenantID, Visibility: row.Visibility, Created: time.UnixMilli(row.Created)}, nil
+	return &PackageOwner{Format: row.Format, Repository: row.Repository, OwnerUserID: row.OwnerUserID, Visibility: row.Visibility, Created: time.UnixMilli(row.Created)}, nil
 }
 
-// ClaimPackage records tenant as the owner of a previously unclaimed name.
+// ClaimPackage records userID as the owner of a previously unclaimed name.
 // Returns ErrPackageOwned when the name is already owned by someone else.
-func (s *CentralStore) ClaimPackage(format, repository string, tid int64) error {
-	row := &packageOwnerRow{Format: format, Repository: repository, TenantID: tid, Visibility: "public", Created: time.Now().UTC().UnixMilli()}
+func (s *CentralStore) ClaimPackage(format, repository string, userID int64) error {
+	row := &packageOwnerRow{Format: format, Repository: repository, OwnerUserID: userID, Visibility: "public", Created: time.Now().UTC().UnixMilli()}
 	res := s.d.gdb.Where("format=? AND repository=?", format, repository).FirstOrCreate(row)
 	if res.Error != nil {
 		return res.Error
@@ -73,20 +60,20 @@ func (s *CentralStore) ClaimPackage(format, repository string, tid int64) error 
 		if err != nil {
 			return err
 		}
-		if existing.TenantID != tid {
+		if existing.OwnerUserID != userID {
 			return fmt.Errorf("%w: %s/%s", ErrPackageOwned, format, repository)
 		}
 	}
 	return nil
 }
 
-// SetPackageVisibility flips a name's visibility (owning tenant only).
-func (s *CentralStore) SetPackageVisibility(format, repository string, tid int64, visibility string) error {
+// SetPackageVisibility flips a name's visibility (owning user only).
+func (s *CentralStore) SetPackageVisibility(format, repository string, userID int64, visibility string) error {
 	if visibility != "public" && visibility != "private" {
 		return fmt.Errorf("invalid visibility %q", visibility)
 	}
 	res := s.d.gdb.Model(&packageOwnerRow{}).
-		Where("format=? AND repository=? AND tenant_id=?", format, repository, tid).
+		Where("format=? AND repository=? AND owner_user_id=?", format, repository, userID).
 		Update("visibility", visibility)
 	if res.Error != nil {
 		return res.Error
@@ -97,32 +84,14 @@ func (s *CentralStore) SetPackageVisibility(format, repository string, tid int64
 	return nil
 }
 
-// TenantHasNamespace reports whether a tenant has evidence of owning an org
-// namespace: at least one repository (or membership row) under that name in
-// the tenant. This grounds npm scope (and OCI namespace) ownership in the
-// easyvcs org model — you can only publish @org/... when your tenant really
-// has that org.
-func (s *CentralStore) TenantHasNamespace(tid int64, namespace string) bool {
-	var n int64
-	s.d.gdb.Model(&repoRow{}).Where("tenant_id=? AND namespace=?", tid, namespace).Count(&n)
-	if n > 0 {
-		return true
-	}
-	s.d.gdb.Model(&namespaceMemberRow{}).Where("tenant_id=? AND namespace=?", tid, namespace).Count(&n)
-	return n > 0
-}
-
-// AuthorizePublish implements the registry Ownership contract: the caller's
-// tenant may publish (format, repository) when it already owns the name, or
-// when the name is unclaimed AND the name's namespace part belongs to the
-// tenant (npm @scope or OCI namespace mapped onto easyvcs orgs).
-func (s *CentralStore) AuthorizePublish(ctx context.Context, format, repository string, tenantID int64) error {
-	if tenantID == 0 {
-		tenantID = 1
-	}
+// AuthorizePublish implements the registry Ownership contract: a user may
+// publish (format, repository) when it already owns the name, or when the name
+// is unclaimed AND the name's namespace part is one the user owns (npm @scope
+// or OCI namespace mapped onto easyvcs namespaces).
+func (s *CentralStore) AuthorizePublish(ctx context.Context, format, repository string, userID int64) error {
 	own, err := s.GetPackageOwner(format, repository)
 	if err == nil {
-		if own.TenantID == tenantID {
+		if own.OwnerUserID == userID {
 			return nil
 		}
 		return fmt.Errorf("%w: %s/%s", ErrPackageOwned, format, repository)
@@ -130,23 +99,20 @@ func (s *CentralStore) AuthorizePublish(ctx context.Context, format, repository 
 	if !errors.Is(err, ErrNotFound) {
 		return err
 	}
-	// Unclaimed: the name's namespace part must belong to the tenant.
+	// Unclaimed: the name's namespace part must belong to the user.
 	ns := NamespaceOfName(format, repository)
 	if ns == "" {
 		return fmt.Errorf("%w: %s/%s has no namespace", ErrScopeNotYours, format, repository)
 	}
-	if !s.TenantHasNamespace(tenantID, ns) {
+	if !s.TenantHasNamespace(userID, ns) {
 		return fmt.Errorf("%w: %q", ErrScopeNotYours, ns)
 	}
-	return s.ClaimPackage(format, repository, tenantID)
+	return s.ClaimPackage(format, repository, userID)
 }
 
 // CanRead implements the registry Ownership contract: public and unclaimed
-// names are readable by everyone; private names only by the owning tenant.
-func (s *CentralStore) CanRead(ctx context.Context, format, repository string, tenantID int64) bool {
-	if tenantID == 0 {
-		tenantID = 1
-	}
+// names are readable by everyone; private names only by the owning user.
+func (s *CentralStore) CanRead(ctx context.Context, format, repository string, userID int64) bool {
 	own, err := s.GetPackageOwner(format, repository)
 	if err != nil {
 		// Unclaimed (proxied upstream packages): public.
@@ -155,7 +121,7 @@ func (s *CentralStore) CanRead(ctx context.Context, format, repository string, t
 	if own.Visibility != "private" {
 		return true
 	}
-	return own.TenantID == tenantID
+	return own.OwnerUserID == userID
 }
 
 // NamespaceOfName extracts the ownership namespace of a registry name per

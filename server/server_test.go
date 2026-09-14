@@ -25,10 +25,10 @@ func newTestServer(t *testing.T, token string) *Server {
 		t.Fatal(err)
 	}
 	s := New(cs, nil)
-	// When a token is requested, register a user + the token so authenticate()
-	// can resolve it, and grant the user write access to the "team" namespace so
-	// pushes to team/* are authorized. Otherwise the store has no users => open
-	// instance (anonymous read/write).
+	// When a token is requested, register a user (who owns the "team"
+	// namespace) + the token so authenticate() can resolve it and pushes to
+	// team/* are authorized. Otherwise the store has no users => open instance
+	// (anonymous READ only; writes always require a token).
 	if token != "" {
 		u, err := cs.CreateUser("tester", "test")
 		if err != nil {
@@ -37,7 +37,7 @@ func newTestServer(t *testing.T, token string) *Server {
 		if _, err := cs.CreateToken(token, u.ID, "write"); err != nil {
 			t.Fatal(err)
 		}
-		if err := cs.AddNamespaceMember("team", u.ID, "member"); err != nil {
+		if err := cs.EnsureNamespace(u.ID, "team"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -46,7 +46,11 @@ func newTestServer(t *testing.T, token string) *Server {
 
 func seedRepo(t *testing.T, s *Server) {
 	t.Helper()
-	repo, err := s.cs.Create(store.RepoRef{Namespace: "team", Name: "app"})
+	owner := int64(0)
+	if u, err := s.cs.GetUserByUsername("tester"); err == nil {
+		owner = u.ID
+	}
+	repo, err := s.cs.Create(store.RepoRef{Owner: owner, Namespace: "team", Name: "app"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +69,7 @@ func seedRepo(t *testing.T, s *Server) {
 }
 
 func TestAdvertiseAndFetch(t *testing.T) {
-	s := newTestServer(t, "")
+	s := newTestServer(t, "secret")
 	seedRepo(t, s)
 	mux := s.Router()
 
@@ -99,7 +103,7 @@ func TestAdvertiseAndFetch(t *testing.T) {
 }
 
 func TestPushDisallowsNonFastForward(t *testing.T) {
-	s := newTestServer(t, "")
+	s := newTestServer(t, "secret")
 	seedRepo(t, s)
 	mux := s.Router()
 
@@ -127,6 +131,7 @@ func TestPushDisallowsNonFastForward(t *testing.T) {
 	payload, _ := transfer.CompressBundle(fwd)
 	req := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(payload))
 	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -138,6 +143,7 @@ func TestPushDisallowsNonFastForward(t *testing.T) {
 	payload2, _ := transfer.CompressBundle(back)
 	req2 := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(payload2))
 	req2.Header.Set("Content-Encoding", "gzip")
+	req2.Header.Set("Authorization", "Bearer secret")
 	rec2 := httptest.NewRecorder()
 	mux.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusConflict {
@@ -146,7 +152,7 @@ func TestPushDisallowsNonFastForward(t *testing.T) {
 }
 
 func TestPushFastForwardAllowed(t *testing.T) {
-	s := newTestServer(t, "")
+	s := newTestServer(t, "secret")
 	seedRepo(t, s)
 	repo, _ := s.cs.OpenRepo(store.RepoRef{Namespace: "team", Name: "app"})
 	revs, _ := repo.ListRevisions()
@@ -156,6 +162,7 @@ func TestPushFastForwardAllowed(t *testing.T) {
 	payload, _ := transfer.CompressBundle(b)
 	req := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(payload))
 	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
 	s.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -197,7 +204,7 @@ func TestPushAuthRequired(t *testing.T) {
 // delta, then fetch back the revision. This avoids binding a port or forking a
 // subprocess.
 func TestEndToEndMockPushFetch(t *testing.T) {
-	s := newTestServer(t, "")
+	s := newTestServer(t, "secret")
 	seedRepo(t, s)
 	srv := httptest.NewServer(s.Router())
 	defer func() { srv.Close() }()
@@ -240,6 +247,7 @@ func TestEndToEndMockPushFetch(t *testing.T) {
 	payload, _ := transfer.CompressBundle(b)
 	req := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(payload))
 	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
 	srv.Config.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -281,6 +289,7 @@ func TestACLDeniesNonMemberWrite(t *testing.T) {
 	payload, _ := transfer.CompressBundle(b)
 	req := httptest.NewRequest(http.MethodPost, "/repo/team/app/push", bytes.NewReader(payload))
 	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Authorization", "Bearer secret")
 	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
 	s.Router().ServeHTTP(rec, req)

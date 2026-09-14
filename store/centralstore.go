@@ -114,34 +114,55 @@ func (s *CentralStore) Init() error {
 	if err := s.d.gdb.AutoMigrate(allModels()...); err != nil {
 		return err
 	}
-	return s.migrateTenants()
-}
-
-// migrateTenants is the one-time tenancy bootstrap. It (1) guarantees the
-// "default" tenant exists with the FIXED id 1 (rows carry tenant_id=1 as the
-// column default, so pre-tenancy data is owned by it), and (2) replaces the
-// legacy two-column unique index on repositories with the tenant-scoped
-// three-column one — AutoMigrate cannot be trusted to re-shape an existing
-// same-named index. Idempotent.
-func (s *CentralStore) migrateTenants() error {
-	var n int64
-	if err := s.d.gdb.Model(&tenantRow{}).Where("id = ?", int64(1)).Count(&n).Error; err != nil {
+	if err := s.migrateOwnership(); err != nil {
 		return err
 	}
-	if n == 0 {
-		def := &tenantRow{ID: 1, Slug: "default", DisplayName: "Default", Created: time.Now().UTC().UnixMilli()}
-		if err := s.d.gdb.Create(def).Error; err != nil {
-			return fmt.Errorf("create default tenant: %w", err)
+	return s.dropLegacyTenantColumns()
+}
+
+// migrateOwnership is the one-time ownership bootstrap. User IS the ownership
+// boundary, so this maps any pre-existing repositories onto an owner user and
+// rebuilds the (owner_user_id, namespace, name) unique index — AutoMigrate
+// cannot be trusted to re-shape an existing same-named index. Idempotent.
+func (s *CentralStore) migrateOwnership() error {
+	// Map repositories without an owner to a user. Legacy rows carried a
+	// tenant_id; the user with the same id (when present) is the natural
+	// owner, otherwise the first user, otherwise 0 ("unowned").
+	if s.d.gdb.Migrator().HasTable(&repoRow{}) {
+		hasTenantCol := s.d.gdb.Migrator().HasColumn(&repoRow{}, "tenant_id")
+		var rows []repoRow
+		if err := s.d.gdb.Find(&rows).Error; err != nil {
+			return err
+		}
+		var users []userRow
+		_ = s.d.gdb.Order("id").Find(&users).Error
+		userIDs := map[int64]bool{}
+		var firstUser int64
+		for i, u := range users {
+			userIDs[u.ID] = true
+			if i == 0 {
+				firstUser = u.ID
+			}
+		}
+		for _, r := range rows {
+			if r.OwnerUserID != 0 {
+				continue
+			}
+			owner := firstUser
+			if hasTenantCol {
+				var tid int64
+				if err := s.d.gdb.Raw("SELECT tenant_id FROM repositories WHERE id=?", r.ID).Scan(&tid).Error; err == nil && userIDs[tid] {
+					owner = tid
+				}
+			}
+			if err := s.d.gdb.Model(&repoRow{}).Where("id=?", r.ID).Update("owner_user_id", owner).Error; err != nil {
+				return err
+			}
 		}
 	}
-	// Legacy index (namespace, name) blocks same-named orgs across tenants.
-	// Drop it if present; the AutoMigrated idx_repo (tenant_id, namespace,
-	// name) — created after the drop on legacy databases — takes over. On a
-	// fresh database AutoMigrate already created the three-column index, so
-	// this is a no-op.
+
+	// Rebuild the repo unique index over the owner column set.
 	if s.d.gdb.Migrator().HasIndex(&repoRow{}, "idx_repo") {
-		// Rebuild unconditionally: cheap, and guarantees the column set
-		// matches the model regardless of which path created it first.
 		if err := s.d.gdb.Migrator().DropIndex(&repoRow{}, "idx_repo"); err != nil {
 			return fmt.Errorf("drop legacy repo index: %w", err)
 		}
@@ -149,43 +170,100 @@ func (s *CentralStore) migrateTenants() error {
 	return s.d.gdb.Migrator().CreateIndex(&repoRow{}, "idx_repo")
 }
 
+// dropLegacyTenantColumns physically removes the retired tenant_id columns and
+// owner-tenant columns from the tables that carried them. SQLite >= 3.35
+// supports DROP COLUMN; a failure is surfaced (hard upgrade requirement).
+// Absent columns (fresh DB) are a no-op, so this is idempotent.
+func (s *CentralStore) dropLegacyTenantColumns() error {
+	if !s.d.isSQLite() {
+		return nil
+	}
+	stale := [][2]string{
+		{"repositories", "tenant_id"},
+		{"users", "tenant_id"},
+		{"namespace_members", "tenant_id"},
+		{"package_owners", "tenant_id"},
+		{"merge_requests", "tenant_id"},
+	}
+	for _, c := range stale {
+		table, col := c[0], c[1]
+		var has bool
+		if err := s.d.gdb.Raw("SELECT EXISTS (SELECT 1 FROM pragma_table_info(?) WHERE name = ?)", table, col).Scan(&has).Error; err != nil {
+			return err
+		}
+		if !has {
+			continue
+		}
+		if err := s.d.gdb.Exec("ALTER TABLE " + table + " DROP COLUMN " + col).Error; err != nil {
+			return fmt.Errorf("drop legacy column %s.%s: %w", table, col, err)
+		}
+	}
+	return nil
+}
+
+// ensureNamespaceRow inserts a namespace owned by owner when absent.
+func (s *CentralStore) ensureNamespaceRow(owner int64, name string) error {
+	if name == "" || owner == 0 {
+		return nil
+	}
+	row := &namespaceRow{OwnerUserID: owner, Name: name, Created: time.Now().UTC().UnixMilli()}
+	return s.d.gdb.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error
+}
+
 // Close closes the underlying database.
 func (s *CentralStore) Close() error { return s.d.db.Close() }
 
-// Create creates a new repository and returns a repo-scoped handle.
+// Create creates a new repository and returns a repo-scoped handle. When
+// RepoRef.Owner is set the owner is the namespace owner (a namespace row is
+// ensured); owner 0 creates an unowned repo (local CLI / dev, no ACLs).
 func (s *CentralStore) Create(r RepoRef) (*Repo, error) {
-	// Check for conflict.
+	if r.Owner != 0 {
+		if err := s.EnsureNamespace(r.Owner, r.Namespace); err != nil {
+			return nil, err
+		}
+	}
 	var count int64
-	if err := s.d.gdb.Model(&repoRow{}).Where("tenant_id=? AND namespace=? AND name=?", r.TenantID(), r.Namespace, r.Name).Count(&count).Error; err != nil {
+	if err := s.d.gdb.Model(&repoRow{}).Where("owner_user_id=? AND namespace=? AND name=?", r.Owner, r.Namespace, r.Name).Count(&count).Error; err != nil {
 		return nil, err
 	}
 	if count > 0 {
 		return nil, fmt.Errorf("%w: %s", ErrRepoExists, r)
 	}
-	row := &repoRow{TenantID: r.TenantID(), Namespace: r.Namespace, Name: r.Name, Created: time.Now().UTC().UnixMilli()}
+	row := &repoRow{OwnerUserID: r.Owner, Namespace: r.Namespace, Name: r.Name, Created: time.Now().UTC().UnixMilli()}
 	if err := s.d.gdb.Create(row).Error; err != nil {
 		return nil, err
 	}
-	return &Repo{cs: s, repoID: row.ID, TenantID: row.TenantID, Namespace: r.Namespace, Name: r.Name}, nil
+	return &Repo{cs: s, repoID: row.ID, OwnerUserID: row.OwnerUserID, Namespace: r.Namespace, Name: r.Name}, nil
 }
 
-// OpenRepo opens an existing repository. Returns ErrRepoNotFound if missing.
+// OpenRepo opens an existing repository. When RepoRef.Owner is 0 the lookup is
+// namespace+name only (requires a globally-unique namespace, which the
+// namespace owner model guarantees); else it is owner-scoped. Returns
+// ErrRepoNotFound if missing.
 func (s *CentralStore) OpenRepo(r RepoRef) (*Repo, error) {
+	q := s.d.gdb.Where("namespace=? AND name=?", r.Namespace, r.Name)
+	if r.Owner != 0 {
+		q = q.Where("owner_user_id=?", r.Owner)
+	}
 	var row repoRow
-	err := s.d.gdb.Where("tenant_id=? AND namespace=? AND name=?", r.TenantID(), r.Namespace, r.Name).First(&row).Error
+	err := q.First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, fmt.Errorf("%w: %s", ErrRepoNotFound, r)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &Repo{cs: s, repoID: row.ID, TenantID: row.TenantID, Namespace: r.Namespace, Name: r.Name}, nil
+	return &Repo{cs: s, repoID: row.ID, OwnerUserID: row.OwnerUserID, Namespace: r.Namespace, Name: r.Name}, nil
 }
 
-// RepoExists reports whether a repository exists.
+// RepoExists reports whether a repository exists (owner 0 = any owner).
 func (s *CentralStore) RepoExists(r RepoRef) (bool, error) {
+	q := s.d.gdb.Model(&repoRow{}).Where("namespace=? AND name=?", r.Namespace, r.Name)
+	if r.Owner != 0 {
+		q = q.Where("owner_user_id=?", r.Owner)
+	}
 	var count int64
-	if err := s.d.gdb.Model(&repoRow{}).Where("tenant_id=? AND namespace=? AND name=?", r.TenantID(), r.Namespace, r.Name).Count(&count).Error; err != nil {
+	if err := q.Count(&count).Error; err != nil {
 		return false, err
 	}
 	return count > 0, nil
@@ -200,7 +278,7 @@ func (s *CentralStore) Delete(r RepoRef) error {
 		return err
 	}
 	mrIDs := s.d.gdb.Model(&mergeRequestRow{}).Select("id").Where("repo_id=?", repo.repoID)
-	for _, table := range []any{&snapshotRow{}, &revisionRow{}, &refRow{}, &mergeRequestRow{}, &branchACLRow{}, &remoteRow{}, &remoteRefRow{}, &pushMirrorRow{}, &workspaceRow{}, &gitRevisionLinkRow{}} {
+	for _, table := range []any{&snapshotRow{}, &revisionRow{}, &refRow{}, &mergeRequestRow{}, &remoteRow{}, &remoteRefRow{}, &pushMirrorRow{}, &workspaceRow{}, &gitRevisionLinkRow{}, &repoMemberRow{}} {
 		if err := s.d.gdb.Where("repo_id=?", repo.repoID).Delete(table).Error; err != nil {
 			return err
 		}
@@ -217,16 +295,15 @@ func (s *CentralStore) Delete(r RepoRef) error {
 	return nil
 }
 
-// List returns all repositories sorted by namespace/name.
-// ListForTenant returns every repository of one tenant.
-func (s *CentralStore) ListForTenant(tid int64) ([]RepoRef, error) {
+// ListForOwner returns every repository owned by one user.
+func (s *CentralStore) ListForOwner(owner int64) ([]RepoRef, error) {
 	var rows []repoRow
-	if err := s.d.gdb.Where("tenant_id=?", tid).Find(&rows).Error; err != nil {
+	if err := s.d.gdb.Where("owner_user_id=?", owner).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	refs := make([]RepoRef, 0, len(rows))
 	for _, row := range rows {
-		refs = append(refs, RepoRef{Tenant: row.TenantID, Namespace: row.Namespace, Name: row.Name})
+		refs = append(refs, RepoRef{Owner: row.OwnerUserID, Namespace: row.Namespace, Name: row.Name})
 	}
 	return refs, nil
 }
@@ -238,7 +315,27 @@ func (s *CentralStore) List() ([]RepoRef, error) {
 	}
 	out := make([]RepoRef, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, RepoRef{Tenant: r.TenantID, Namespace: r.Namespace, Name: r.Name})
+		out = append(out, RepoRef{Owner: r.OwnerUserID, Namespace: r.Namespace, Name: r.Name})
+	}
+	return out, nil
+}
+
+// ListAccessible returns every repository a user may READ: public repos (any
+// owner) plus private repos where the user is the owner or a repo member.
+func (s *CentralStore) ListAccessible(userID int64) ([]RepoRef, error) {
+	var rows []repoRow
+	q := s.d.gdb.Where("visibility != ?", "private")
+	if userID != 0 {
+		q = s.d.gdb.Where(
+			"visibility != ? OR owner_user_id = ? OR id IN (SELECT repo_id FROM repo_members WHERE user_id = ?)",
+			"private", userID, userID)
+	}
+	if err := q.Order("namespace, name").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]RepoRef, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, RepoRef{Owner: r.OwnerUserID, Namespace: r.Namespace, Name: r.Name})
 	}
 	return out, nil
 }
@@ -769,7 +866,12 @@ func (r *Repo) ListRefs() ([]*Ref, error) {
 func (r *Repo) Close() error { return nil }
 
 // RepoRef returns the RepoRef for this handle.
-func (r *Repo) RepoRef() RepoRef { return RepoRef{Tenant: r.TenantID, Namespace: r.Namespace, Name: r.Name} }
+func (r *Repo) RepoRef() RepoRef {
+	return RepoRef{Owner: r.OwnerUserID, Namespace: r.Namespace, Name: r.Name}
+}
+
+// Owner returns the repository's owner user id (the namespace owner).
+func (r *Repo) Owner() int64 { return r.OwnerUserID }
 
 // Remote is a named URL to another EasyVCS server. Token is the optional
 // bearer token used to authenticate writes against that server.

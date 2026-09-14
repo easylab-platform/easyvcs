@@ -164,7 +164,7 @@ func (s *CentralStore) repoByID(id int64) (RepoRef, error) {
 	if err := s.d.gdb.Where("id=?", id).First(&row).Error; err != nil {
 		return RepoRef{}, err
 	}
-	return RepoRef{Tenant: row.TenantID, Namespace: row.Namespace, Name: row.Name}, nil
+	return RepoRef{Owner: row.OwnerUserID, Namespace: row.Namespace, Name: row.Name}, nil
 }
 
 // FindRepo walks up from dir to locate the repo a workspace belongs to. It
