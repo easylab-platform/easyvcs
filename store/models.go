@@ -17,11 +17,12 @@ import (
 // so its owner (the namespace owner) is unambiguous. Additional collaborators
 // are granted per-repository roles (maintainer / developer) via repo_members.
 
-// repositories table. OwnerUserID scopes (namespace, name): user A and user B
-// may each own an "acme/api" repo. The owner is the namespace owner.
+// repositories table. (Namespace, name) is globally unique: a repository is
+// addressed as namespace/name (GitHub-like), and its owner is the namespace
+// owner (denormalized into owner_user_id for fast authorization).
 type repoRow struct {
 	ID             int64  `gorm:"primaryKey;autoIncrement"`
-	OwnerUserID    int64  `gorm:"not null;default:0;uniqueIndex:idx_repo"`
+	OwnerUserID    int64  `gorm:"not null;default:0"`
 	Namespace      string `gorm:"not null;uniqueIndex:idx_repo"`
 	Name           string `gorm:"not null;uniqueIndex:idx_repo"`
 	Created        int64  `gorm:"not null"`
@@ -40,11 +41,12 @@ type repoRow struct {
 
 func (repoRow) TableName() string { return "repositories" }
 
-// namespaces table. A namespace (org) is owned by exactly one user; the
-// (owner_user_id, name) pair is unique. A user may own many namespaces.
+// namespaces table. A namespace (org) is owned by exactly one user and its name
+// is globally unique (so namespace/name addresses a repository unambiguously).
+// A user may own many namespaces.
 type namespaceRow struct {
 	ID          int64  `gorm:"primaryKey;autoIncrement"`
-	OwnerUserID int64  `gorm:"not null;uniqueIndex:idx_namespace"`
+	OwnerUserID int64  `gorm:"not null"`
 	Name        string `gorm:"not null;uniqueIndex:idx_namespace"`
 	Created     int64  `gorm:"not null"`
 }

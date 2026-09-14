@@ -121,19 +121,35 @@ func (s *CentralStore) Init() error {
 }
 
 // migrateOwnership is the one-time ownership bootstrap. User IS the ownership
-// boundary, so this maps any pre-existing repositories onto an owner user and
-// rebuilds the (owner_user_id, namespace, name) unique index — AutoMigrate
-// cannot be trusted to re-shape an existing same-named index. Idempotent.
+// boundary, so this rebuilds the repository unique index onto the globally
+// unique (namespace, name) pair (AutoMigrate cannot be trusted to re-shape an
+// existing same-named index). Owner backfill for legacy rows happens in
+// dropLegacyTenantColumns, which reads tenant_id before dropping it. Idempotent.
 func (s *CentralStore) migrateOwnership() error {
-	// Map repositories without an owner to a user. Legacy rows carried a
-	// tenant_id; the user with the same id (when present) is the natural
-	// owner, otherwise the first user, otherwise 0 ("unowned").
-	if s.d.gdb.Migrator().HasTable(&repoRow{}) {
-		hasTenantCol := s.d.gdb.Migrator().HasColumn(&repoRow{}, "tenant_id")
-		var rows []repoRow
-		if err := s.d.gdb.Find(&rows).Error; err != nil {
-			return err
+	if s.d.gdb.Migrator().HasIndex(&repoRow{}, "idx_repo") {
+		if err := s.d.gdb.Migrator().DropIndex(&repoRow{}, "idx_repo"); err != nil {
+			return fmt.Errorf("drop legacy repo index: %w", err)
 		}
+	}
+	return s.d.gdb.Migrator().CreateIndex(&repoRow{}, "idx_repo")
+}
+
+// dropLegacyTenantColumns removes the retired tenant_id columns, first
+// backfilling repositories.owner_user_id from the user whose id matched the
+// legacy tenant id (the user-as-tenant mapping). SQLite >= 3.35 supports DROP
+// COLUMN; a failure is surfaced (hard upgrade requirement). Absent columns
+// (fresh DB) are a no-op, so this is idempotent.
+func (s *CentralStore) dropLegacyTenantColumns() error {
+	if !s.d.isSQLite() {
+		return nil
+	}
+	// Backfill owner from the legacy tenant mapping (user id == tenant id).
+	hasOwner := s.d.gdb.Migrator().HasColumn(&repoRow{}, "owner_user_id")
+	hasTenant := true
+	if !s.d.gdb.Migrator().HasColumn(&repoRow{}, "tenant_id") {
+		hasTenant = false
+	}
+	if hasOwner && hasTenant {
 		var users []userRow
 		_ = s.d.gdb.Order("id").Find(&users).Error
 		userIDs := map[int64]bool{}
@@ -144,39 +160,23 @@ func (s *CentralStore) migrateOwnership() error {
 				firstUser = u.ID
 			}
 		}
+		var rows []repoRow
+		if err := s.d.gdb.Find(&rows).Error; err != nil {
+			return err
+		}
 		for _, r := range rows {
 			if r.OwnerUserID != 0 {
 				continue
 			}
 			owner := firstUser
-			if hasTenantCol {
-				var tid int64
-				if err := s.d.gdb.Raw("SELECT tenant_id FROM repositories WHERE id=?", r.ID).Scan(&tid).Error; err == nil && userIDs[tid] {
-					owner = tid
-				}
+			var tid int64
+			if err := s.d.gdb.Raw("SELECT tenant_id FROM repositories WHERE id=?", r.ID).Scan(&tid).Error; err == nil && userIDs[tid] {
+				owner = tid
 			}
 			if err := s.d.gdb.Model(&repoRow{}).Where("id=?", r.ID).Update("owner_user_id", owner).Error; err != nil {
 				return err
 			}
 		}
-	}
-
-	// Rebuild the repo unique index over the owner column set.
-	if s.d.gdb.Migrator().HasIndex(&repoRow{}, "idx_repo") {
-		if err := s.d.gdb.Migrator().DropIndex(&repoRow{}, "idx_repo"); err != nil {
-			return fmt.Errorf("drop legacy repo index: %w", err)
-		}
-	}
-	return s.d.gdb.Migrator().CreateIndex(&repoRow{}, "idx_repo")
-}
-
-// dropLegacyTenantColumns physically removes the retired tenant_id columns and
-// owner-tenant columns from the tables that carried them. SQLite >= 3.35
-// supports DROP COLUMN; a failure is surfaced (hard upgrade requirement).
-// Absent columns (fresh DB) are a no-op, so this is idempotent.
-func (s *CentralStore) dropLegacyTenantColumns() error {
-	if !s.d.isSQLite() {
-		return nil
 	}
 	stale := [][2]string{
 		{"repositories", "tenant_id"},
@@ -187,11 +187,11 @@ func (s *CentralStore) dropLegacyTenantColumns() error {
 	}
 	for _, c := range stale {
 		table, col := c[0], c[1]
-		var has bool
-		if err := s.d.gdb.Raw("SELECT EXISTS (SELECT 1 FROM pragma_table_info(?) WHERE name = ?)", table, col).Scan(&has).Error; err != nil {
+		var exists bool
+		if err := s.d.gdb.Raw("SELECT EXISTS (SELECT 1 FROM pragma_table_info(?) WHERE name = ?)", table, col).Scan(&exists).Error; err != nil {
 			return err
 		}
-		if !has {
+		if !exists {
 			continue
 		}
 		if err := s.d.gdb.Exec("ALTER TABLE " + table + " DROP COLUMN " + col).Error; err != nil {
@@ -213,9 +213,10 @@ func (s *CentralStore) ensureNamespaceRow(owner int64, name string) error {
 // Close closes the underlying database.
 func (s *CentralStore) Close() error { return s.d.db.Close() }
 
-// Create creates a new repository and returns a repo-scoped handle. When
-// RepoRef.Owner is set the owner is the namespace owner (a namespace row is
-// ensured); owner 0 creates an unowned repo (local CLI / dev, no ACLs).
+// Create creates a new repository and returns a repo-scoped handle. The
+// namespace is globally unique and owned by the user in RepoRef.Owner; owner 0
+// creates an unowned, public dev repo (no ACLs). The owner is denormalized into
+// owner_user_id.
 func (s *CentralStore) Create(r RepoRef) (*Repo, error) {
 	if r.Owner != 0 {
 		if err := s.EnsureNamespace(r.Owner, r.Namespace); err != nil {
@@ -223,7 +224,7 @@ func (s *CentralStore) Create(r RepoRef) (*Repo, error) {
 		}
 	}
 	var count int64
-	if err := s.d.gdb.Model(&repoRow{}).Where("owner_user_id=? AND namespace=? AND name=?", r.Owner, r.Namespace, r.Name).Count(&count).Error; err != nil {
+	if err := s.d.gdb.Model(&repoRow{}).Where("namespace=? AND name=?", r.Namespace, r.Name).Count(&count).Error; err != nil {
 		return nil, err
 	}
 	if count > 0 {
@@ -236,17 +237,11 @@ func (s *CentralStore) Create(r RepoRef) (*Repo, error) {
 	return &Repo{cs: s, repoID: row.ID, OwnerUserID: row.OwnerUserID, Namespace: r.Namespace, Name: r.Name}, nil
 }
 
-// OpenRepo opens an existing repository. When RepoRef.Owner is 0 the lookup is
-// namespace+name only (requires a globally-unique namespace, which the
-// namespace owner model guarantees); else it is owner-scoped. Returns
+// OpenRepo opens an existing repository by namespace/name (global). Returns
 // ErrRepoNotFound if missing.
 func (s *CentralStore) OpenRepo(r RepoRef) (*Repo, error) {
-	q := s.d.gdb.Where("namespace=? AND name=?", r.Namespace, r.Name)
-	if r.Owner != 0 {
-		q = q.Where("owner_user_id=?", r.Owner)
-	}
 	var row repoRow
-	err := q.First(&row).Error
+	err := s.d.gdb.Where("namespace=? AND name=?", r.Namespace, r.Name).First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, fmt.Errorf("%w: %s", ErrRepoNotFound, r)
 	}
@@ -256,14 +251,10 @@ func (s *CentralStore) OpenRepo(r RepoRef) (*Repo, error) {
 	return &Repo{cs: s, repoID: row.ID, OwnerUserID: row.OwnerUserID, Namespace: r.Namespace, Name: r.Name}, nil
 }
 
-// RepoExists reports whether a repository exists (owner 0 = any owner).
+// RepoExists reports whether a repository exists (namespace/name is global).
 func (s *CentralStore) RepoExists(r RepoRef) (bool, error) {
-	q := s.d.gdb.Model(&repoRow{}).Where("namespace=? AND name=?", r.Namespace, r.Name)
-	if r.Owner != 0 {
-		q = q.Where("owner_user_id=?", r.Owner)
-	}
 	var count int64
-	if err := q.Count(&count).Error; err != nil {
+	if err := s.d.gdb.Model(&repoRow{}).Where("namespace=? AND name=?", r.Namespace, r.Name).Count(&count).Error; err != nil {
 		return false, err
 	}
 	return count > 0, nil
@@ -519,6 +510,18 @@ func (s *CentralStore) Fork(src RepoRef, dst RepoRef) (*Repo, error) {
 func mustHexID(s string) object.ID {
 	id, _ := object.HexToID(s)
 	return id
+}
+
+// RepoRefByID resolves a repository id to its RepoRef (namespace/name/owner).
+func (s *CentralStore) RepoRefByID(id int64) (RepoRef, error) {
+	var row repoRow
+	if err := s.d.gdb.Where("id=?", id).First(&row).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return RepoRef{}, ErrRepoNotFound
+		}
+		return RepoRef{}, err
+	}
+	return RepoRef{Owner: row.OwnerUserID, Namespace: row.Namespace, Name: row.Name}, nil
 }
 
 // RepoID returns the numeric repo id used internally.

@@ -66,6 +66,22 @@ func (s *CentralStore) GetUserByUsername(username string) (*User, error) {
 	return userFromRow(&row), nil
 }
 
+// GetUserByAgentTenant resolves the user bound to an abcp-agent tenant id.
+func (s *CentralStore) GetUserByAgentTenant(agentTenant string) (*User, error) {
+	if agentTenant == "" {
+		return nil, ErrNotFound
+	}
+	var row userRow
+	err := s.d.gdb.Where("agent_tenant=?", agentTenant).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return userFromRow(&row), nil
+}
+
 // ListUsers returns all users ordered by username.
 func (s *CentralStore) ListUsers() ([]*User, error) {
 	var rows []userRow
