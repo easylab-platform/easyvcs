@@ -42,7 +42,8 @@ func (r Role) AtLeast(min Role) bool {
 }
 
 // RoleOf resolves the effective role of userID on a repository. userID 0 is an
-// anonymous caller.
+// anonymous caller. A public repository grants "developer" to everyone as a
+// fallback (read/propose only).
 func (s *CentralStore) RoleOf(repoID, userID int64) (Role, error) {
 	var row repoRow
 	if err := s.d.gdb.Where("id=?", repoID).First(&row).Error; err != nil {
@@ -74,6 +75,36 @@ func (s *CentralStore) RoleOf(repoID, userID int64) (Role, error) {
 	return RoleNone, nil
 }
 
+// MemberRoleOf is RoleOf WITHOUT the public fallback: it returns a role only
+// when the user is the owner or holds an explicit repo_members grant. It is
+// used where the public fallback must not leak access (private registry
+// packages whose name maps to a public repo).
+func (s *CentralStore) MemberRoleOf(repoID, userID int64) (Role, error) {
+	var row repoRow
+	if err := s.d.gdb.Where("id=?", repoID).First(&row).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return RoleNone, ErrNotFound
+		}
+		return RoleNone, err
+	}
+	if userID != 0 && userID == row.OwnerUserID {
+		return RoleOwner, nil
+	}
+	if userID != 0 {
+		memberRole, err := s.RepoMemberRole(repoID, userID)
+		if err != nil {
+			return RoleNone, err
+		}
+		switch memberRole {
+		case RoleMaintainer:
+			return Role(RoleMaintainer), nil
+		case RoleDeveloper:
+			return Role(RoleDeveloper), nil
+		}
+	}
+	return RoleNone, nil
+}
+
 // RoleOfRef resolves the effective role of userID on the repo named by ref.
 func (s *CentralStore) RoleOfRef(ref RepoRef, userID int64) (Role, error) {
 	repo, err := s.OpenRepo(ref)
@@ -81,6 +112,31 @@ func (s *CentralStore) RoleOfRef(ref RepoRef, userID int64) (Role, error) {
 		return RoleNone, err
 	}
 	return s.RoleOf(repo.repoID, userID)
+}
+
+// MemberRoleOfRef resolves the role of userID on a repo without the public
+// fallback (owner or explicit repo_members grant only).
+func (s *CentralStore) MemberRoleOfRef(ref RepoRef, userID int64) (Role, error) {
+	repo, err := s.OpenRepo(ref)
+	if err != nil {
+		return RoleNone, err
+	}
+	return s.MemberRoleOf(repo.repoID, userID)
+}
+
+// RoleForOwner resolves the role of userID for a resource described only by its
+// owner + visibility (no repository row): the owner is "owner", a non-private
+// (public) resource grants "developer" to everyone, and a private resource with
+// no owner match grants nothing. It is the fallback for registry packages whose
+// name maps to no easyvcs repository.
+func RoleForOwner(ownerUserID int64, visibility string, userID int64) Role {
+	if userID != 0 && userID == ownerUserID {
+		return RoleOwner
+	}
+	if visibility != "private" {
+		return Role(RoleDeveloper)
+	}
+	return RoleNone
 }
 
 // CanPush reports whether the role may directly push/set refs (owner only).

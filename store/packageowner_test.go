@@ -87,3 +87,74 @@ func TestNamespaceOfName(t *testing.T) {
 		}
 	}
 }
+
+// A package whose name maps to a repository inherits that repo's roles: the
+// repo maintainer may publish, a developer may not, and a private package is
+// readable by repo members only.
+func TestPackageRolesInheritFromRepo(t *testing.T) {
+	s := openTenantStore(t)
+	owner, _ := s.CreateUser("owner", "Owner")
+	maint, _ := s.CreateUser("maint", "Maintainer")
+	dev, _ := s.CreateUser("dev", "Developer")
+	outsider, _ := s.CreateUser("outsider", "Outsider")
+	ctx := t.Context()
+
+	// Repo acme/api; npm name @acme/api maps to it.
+	repo, err := s.Create(RepoRef{Owner: owner.ID, Namespace: "acme", Name: "api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref, ok := s.RepoForPackage("npm", "@acme/api"); !ok || ref.Name != "api" {
+		t.Fatalf("RepoForPackage npm @acme/api = %+v %v", ref, ok)
+	}
+	if err := s.SetRepoMember(repo.RepoID(), maint.ID, RoleMaintainer, &owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetRepoMember(repo.RepoID(), dev.ID, RoleDeveloper, &owner.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Owner + maintainer may claim/publish; developer may not.
+	if err := s.AuthorizePublish(ctx, "npm", "@acme/api", maint.ID); err != nil {
+		t.Fatalf("maintainer claim: %v", err)
+	}
+	if err := s.AuthorizePublish(ctx, "npm", "@acme/api", dev.ID); err == nil {
+		t.Fatal("developer publish must be refused")
+	}
+	// Owner may re-publish (already claimed, still maintainer+).
+	if err := s.AuthorizePublish(ctx, "npm", "@acme/api", owner.ID); err != nil {
+		t.Fatalf("owner re-publish: %v", err)
+	}
+
+	// Private: repo members read, outsider does not.
+	if err := s.SetPackageVisibilityAuthorized("npm", "@acme/api", owner.ID, "private"); err != nil {
+		t.Fatal(err)
+	}
+	if !s.CanRead(ctx, "npm", "@acme/api", maint.ID) || !s.CanRead(ctx, "npm", "@acme/api", owner.ID) {
+		t.Fatal("members must read private package")
+	}
+	if s.CanRead(ctx, "npm", "@acme/api", outsider.ID) {
+		t.Fatal("outsider must NOT read a private package")
+	}
+	// A maintainer can flip visibility; a developer cannot.
+	if err := s.SetPackageVisibilityAuthorized("npm", "@acme/api", maint.ID, "public"); err != nil {
+		t.Fatalf("maintainer visibility flip: %v", err)
+	}
+	if err := s.SetPackageVisibilityAuthorized("npm", "@acme/api", dev.ID, "private"); err == nil {
+		t.Fatal("developer visibility flip must be refused")
+	}
+}
+
+// An unclaimed name (pull-through cache) is readable by everyone and grants no
+// management rights.
+func TestUnclaimedPackageIsPublicReadOnly(t *testing.T) {
+	s := openTenantStore(t)
+	alice, _ := s.CreateUser("alice", "Alice")
+	ctx := t.Context()
+	if !s.CanRead(ctx, "npm", "lodash", alice.ID) {
+		t.Fatal("unclaimed package must be public-readable")
+	}
+	if role, _ := s.PackageScopeRole("npm", "lodash", alice.ID); role.CanMerge() {
+		t.Fatalf("unclaimed package must grant no management, got %q", role)
+	}
+}
