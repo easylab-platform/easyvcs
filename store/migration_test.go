@@ -28,6 +28,10 @@ func TestTenancyMigration(t *testing.T) {
 		`CREATE TABLE repositories (id INTEGER PRIMARY KEY, tenant_id INTEGER DEFAULT 1, namespace TEXT, name TEXT, created INTEGER, description TEXT DEFAULT '', visibility TEXT DEFAULT 'public', default_branch TEXT DEFAULT 'main', kind TEXT DEFAULT 'normal', mirror_url TEXT DEFAULT '', mirror_branch TEXT DEFAULT 'main', mirror_interval INTEGER DEFAULT 300, mirror_last_rev TEXT DEFAULT '', mirror_last_sync INTEGER DEFAULT 0, mirror_last_error TEXT DEFAULT '', mirror_token TEXT DEFAULT '')`,
 		`CREATE TABLE namespace_members (tenant_id INTEGER DEFAULT 1, namespace TEXT, user_id INTEGER, role TEXT DEFAULT 'member', PRIMARY KEY (tenant_id, namespace, user_id))`,
 		`CREATE TABLE package_owners (id INTEGER PRIMARY KEY, format TEXT, repository TEXT, tenant_id INTEGER DEFAULT 1, visibility TEXT DEFAULT 'public', created INTEGER)`,
+		// Legacy GORM indexes that name tenant_id (must be dropped before the
+		// column; SQLite otherwise refuses the column drop).
+		`CREATE INDEX idx_users_tenant_id ON users(tenant_id)`,
+		`CREATE INDEX idx_repositories_tenant_id ON repositories(tenant_id)`,
 		`INSERT INTO tenants (id, slug, display_name, created, agent_tenant, agent_token) VALUES (1,'default','Default',0,'default','agent-tok-1')`,
 		`INSERT INTO tenants (id, slug, display_name, created, agent_tenant, agent_token) VALUES (2,'acme','Acme',0,'acme','agent-tok-2')`,
 		`INSERT INTO users (id, tenant_id, username, display_name, created) VALUES (1,1,'operator','Operator',0)`,

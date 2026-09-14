@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -224,6 +225,13 @@ func (s *CentralStore) dropLegacyTenantColumns() error {
 	}
 
 	// 5. Drop the retired columns, then the tenants table.
+	// Dependent indexes (created by the old models' index tags) must be
+	// dropped first: SQLite refuses to drop a column an index still names.
+	for _, table := range []string{"repositories", "users", "package_owners", "merge_requests"} {
+		if err := s.dropIndexesOnColumn(table, "tenant_id"); err != nil {
+			return err
+		}
+	}
 	stale := [][2]string{
 		{"repositories", "tenant_id"},
 		{"users", "tenant_id"},
@@ -254,6 +262,28 @@ func (s *CentralStore) dropLegacyTenantColumns() error {
 	if hasTenants {
 		if err := s.d.gdb.Migrator().DropTable("tenants"); err != nil {
 			return fmt.Errorf("drop retired tenants table: %w", err)
+		}
+	}
+	return nil
+}
+
+// dropIndexesOnColumn drops every index (sqlite) that references the given
+// column, so the column can subsequently be dropped. Non-sqlite backends and
+// absent tables are a no-op.
+func (s *CentralStore) dropIndexesOnColumn(table, column string) error {
+	if !s.d.isSQLite() {
+		return nil
+	}
+	var names []string
+	if err := s.d.gdb.Raw("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql LIKE ?", table, "%"+column+"%").Scan(&names).Error; err != nil {
+		return err
+	}
+	for _, n := range names {
+		if n == "" || strings.HasPrefix(n, "sqlite_autoindex") {
+			continue
+		}
+		if err := s.d.gdb.Exec("DROP INDEX IF EXISTS " + n).Error; err != nil {
+			return fmt.Errorf("drop index %s: %w", n, err)
 		}
 	}
 	return nil
