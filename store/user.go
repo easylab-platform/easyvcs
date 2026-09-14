@@ -26,6 +26,10 @@ type Tenant struct {
 	DisplayName string
 	Disabled    bool
 	Created     time.Time
+	// AgentTenant / AgentToken are the explicit binding to the abcp-agent
+	// tenant (see the row comment in models.go).
+	AgentTenant string
+	AgentToken  string
 }
 
 // CreateTenant inserts a tenant. The slug must be unique.
@@ -48,7 +52,7 @@ func (s *CentralStore) GetTenant(id int64) (*Tenant, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Tenant{ID: row.ID, Slug: row.Slug, DisplayName: row.DisplayName, Disabled: row.Disabled, Created: time.UnixMilli(row.Created)}, nil
+	return tenantFromRow(&row), nil
 }
 
 // GetTenantBySlug returns a tenant by slug.
@@ -61,7 +65,15 @@ func (s *CentralStore) GetTenantBySlug(slug string) (*Tenant, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Tenant{ID: row.ID, Slug: row.Slug, DisplayName: row.DisplayName, Disabled: row.Disabled, Created: time.UnixMilli(row.Created)}, nil
+	return tenantFromRow(&row), nil
+}
+
+func tenantFromRow(row *tenantRow) *Tenant {
+	return &Tenant{
+		ID: row.ID, Slug: row.Slug, DisplayName: row.DisplayName,
+		Disabled: row.Disabled, Created: time.UnixMilli(row.Created),
+		AgentTenant: row.AgentTenant, AgentToken: row.AgentToken,
+	}
 }
 
 // AgentToken returns the tenant's agent credential ("" when unset).
@@ -73,9 +85,29 @@ func (s *CentralStore) AgentToken(tenantID int64) (string, error) {
 	return row.AgentToken, nil
 }
 
-// SetAgentToken stores the tenant's agent credential.
-func (s *CentralStore) SetAgentToken(tenantID int64, token string) error {
-	return s.d.gdb.Model(&tenantRow{}).Where("id=?", tenantID).Update("agent_token", token).Error
+// AgentBinding returns the tenant's bound agent tenant id + credential.
+func (s *CentralStore) AgentBinding(tenantID int64) (agentTenant, agentToken string, err error) {
+	var row tenantRow
+	if err := s.d.gdb.Select("agent_tenant", "agent_token").First(&row, tenantID).Error; err != nil {
+		return "", "", err
+	}
+	return row.AgentTenant, row.AgentToken, nil
+}
+
+// SetAgentBinding stores the tenant's bound agent tenant id + credential
+// (empty values are ignored, so a partial update never clears the other).
+func (s *CentralStore) SetAgentBinding(tenantID int64, agentTenant, agentToken string) error {
+	updates := map[string]any{}
+	if agentTenant != "" {
+		updates["agent_tenant"] = agentTenant
+	}
+	if agentToken != "" {
+		updates["agent_token"] = agentToken
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	return s.d.gdb.Model(&tenantRow{}).Where("id=?", tenantID).Updates(updates).Error
 }
 
 // UpdateTenant patches display name / disabled state.
@@ -134,9 +166,51 @@ func (s *CentralStore) ListTenants() ([]*Tenant, error) {
 	}
 	out := make([]*Tenant, 0, len(rows))
 	for i := range rows {
-		out = append(out, &Tenant{ID: rows[i].ID, Slug: rows[i].Slug, DisplayName: rows[i].DisplayName, Disabled: rows[i].Disabled, Created: time.UnixMilli(rows[i].Created)})
+		out = append(out, tenantFromRow(&rows[i]))
 	}
 	return out, nil
+}
+
+// DeleteTenant removes a tenant and every row scoped to it: its repositories
+// (with their metadata), users, tokens, namespace memberships, and package
+// ownership claims. The default tenant (id 1) is protected. The caller is
+// responsible for cascading to the agent (AdminService.DeleteTenant).
+func (s *CentralStore) DeleteTenant(id int64) error {
+	if id == 0 || id == 1 {
+		return errors.New("store: the default tenant cannot be deleted")
+	}
+	t, err := s.GetTenant(id)
+	if err != nil {
+		return err
+	}
+	refs, err := s.ListForTenant(t.ID)
+	if err != nil {
+		return err
+	}
+	for _, r := range refs {
+		if err := s.Delete(r); err != nil {
+			return err
+		}
+	}
+	var users []userRow
+	if err := s.d.gdb.Where("tenant_id=?", id).Find(&users).Error; err != nil {
+		return err
+	}
+	for _, u := range users {
+		if err := s.d.gdb.Where("user_id=?", u.ID).Delete(&tokenRow{}).Error; err != nil {
+			return err
+		}
+	}
+	if err := s.d.gdb.Where("tenant_id=?", id).Delete(&namespaceMemberRow{}).Error; err != nil {
+		return err
+	}
+	if err := s.d.gdb.Where("tenant_id=?", id).Delete(&userRow{}).Error; err != nil {
+		return err
+	}
+	if err := s.d.gdb.Where("tenant_id=?", id).Delete(&packageOwnerRow{}).Error; err != nil {
+		return err
+	}
+	return s.d.gdb.Delete(&tenantRow{}, id).Error
 }
 
 // ErrUsernameTaken is returned when creating a user that already exists.

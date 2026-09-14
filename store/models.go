@@ -121,6 +121,11 @@ type tenantRow struct {
 	DisplayName string `gorm:"not null;default:''"`
 	Disabled    bool   `gorm:"not null;default:false"`
 	Created     int64  `gorm:"not null"`
+	// AgentTenant is the abcp-agent tenant id bound to this easyvcs tenant
+	// (set at provisioning time; the default tenant binds to the agent's
+	// bootstrap tenant). It is the explicit record of the easyvcs↔agent
+	// tenancy binding.
+	AgentTenant string `gorm:"not null;default:''"`
 	// AgentToken is the tenant's agent.v1 bearer credential (the bootstrap
 	// token minted by the agent's AdminService at tenant creation). The
 	// gateway presents it on every forwarded agent RPC of this tenant. It is
