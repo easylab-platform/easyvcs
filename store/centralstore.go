@@ -134,54 +134,99 @@ func (s *CentralStore) migrateOwnership() error {
 	return s.d.gdb.Migrator().CreateIndex(&repoRow{}, "idx_repo")
 }
 
-// dropLegacyTenantColumns removes the retired tenant_id columns, first
-// backfilling repositories.owner_user_id from the user whose id matched the
-// legacy tenant id (the user-as-tenant mapping). SQLite >= 3.35 supports DROP
-// COLUMN; a failure is surfaced (hard upgrade requirement). Absent columns
-// (fresh DB) are a no-op, so this is idempotent.
+// dropLegacyTenantColumns migrates the retired tenancy into the user model and
+// then physically removes the tenant artifacts:
+//
+//  1. map legacy tenant -> its user (users.tenant_id, before it is dropped);
+//  2. backfill repositories.owner_user_id from that map;
+//  3. move tenants.agent_tenant/agent_token onto the matching user;
+//  4. ensure a namespace row exists for every owned repository;
+//  5. drop the tenant_id columns and the tenants table.
+//
+// SQLite >= 3.35 supports DROP COLUMN; a failure is surfaced (hard upgrade
+// requirement). Absent columns (fresh DB) are a no-op, so this is idempotent.
 func (s *CentralStore) dropLegacyTenantColumns() error {
 	if !s.d.isSQLite() {
 		return nil
 	}
-	// Backfill owner from the legacy tenant mapping (user id == tenant id).
-	hasOwner := s.d.gdb.Migrator().HasColumn(&repoRow{}, "owner_user_id")
-	hasTenant := true
-	if !s.d.gdb.Migrator().HasColumn(&repoRow{}, "tenant_id") {
-		hasTenant = false
-	}
-	if hasOwner && hasTenant {
-		var users []userRow
-		_ = s.d.gdb.Order("id").Find(&users).Error
-		userIDs := map[int64]bool{}
+	hasRepoOwner := s.d.gdb.Migrator().HasColumn(&repoRow{}, "owner_user_id")
+	hasRepoTenant := s.d.gdb.Migrator().HasColumn(&repoRow{}, "tenant_id")
+	hasUserTenant := s.d.gdb.Migrator().HasColumn(&userRow{}, "tenant_id")
+	hasTenants := s.d.gdb.Migrator().HasTable("tenants")
+
+	if hasRepoTenant && (hasRepoOwner || hasUserTenant) {
+		// 1. tenant id -> user id (the tenant's single user, per the old model).
+		tenantUser := map[int64]int64{}
 		var firstUser int64
-		for i, u := range users {
-			userIDs[u.ID] = true
-			if i == 0 {
-				firstUser = u.ID
+		if hasUserTenant {
+			type ut struct {
+				ID       int64
+				TenantID int64
+			}
+			var rows []ut
+			_ = s.d.gdb.Raw("SELECT id, tenant_id FROM users").Scan(&rows).Error
+			for _, r := range rows {
+				if r.TenantID != 0 {
+					tenantUser[r.TenantID] = r.ID
+				}
+				if firstUser == 0 {
+					firstUser = r.ID
+				}
 			}
 		}
-		var rows []repoRow
-		if err := s.d.gdb.Find(&rows).Error; err != nil {
+		var repos []repoRow
+		if err := s.d.gdb.Find(&repos).Error; err != nil {
 			return err
 		}
-		for _, r := range rows {
-			if r.OwnerUserID != 0 {
+		for _, r := range repos {
+			if hasRepoOwner && r.OwnerUserID != 0 {
 				continue
 			}
-			owner := firstUser
 			var tid int64
-			if err := s.d.gdb.Raw("SELECT tenant_id FROM repositories WHERE id=?", r.ID).Scan(&tid).Error; err == nil && userIDs[tid] {
-				owner = tid
-			}
-			if err := s.d.gdb.Model(&repoRow{}).Where("id=?", r.ID).Update("owner_user_id", owner).Error; err != nil {
+			if err := s.d.gdb.Raw("SELECT tenant_id FROM repositories WHERE id=?", r.ID).Scan(&tid).Error; err != nil {
 				return err
+			}
+			owner := tenantUser[tid]
+			if owner == 0 {
+				owner = firstUser
+			}
+			if hasRepoOwner {
+				if err := s.d.gdb.Model(&repoRow{}).Where("id=?", r.ID).Update("owner_user_id", owner).Error; err != nil {
+					return err
+				}
+			}
+			// 4. namespace row for the repository's owner.
+			if owner != 0 {
+				if err := s.ensureNamespaceRow(owner, r.Namespace); err != nil {
+					return err
+				}
+			}
+		}
+		// 3. move agent bindings from the tenant row onto the user.
+		if hasTenants {
+			type trow struct {
+				ID          int64
+				AgentTenant string
+				AgentToken  string
+			}
+			var trows []trow
+			_ = s.d.gdb.Raw("SELECT id, agent_tenant, agent_token FROM tenants").Scan(&trows).Error
+			for _, t := range trows {
+				uid := tenantUser[t.ID]
+				if uid == 0 || (t.AgentTenant == "" && t.AgentToken == "") {
+					continue
+				}
+				if err := s.SetAgentBinding(uid, t.AgentTenant, t.AgentToken); err != nil {
+					return err
+				}
 			}
 		}
 	}
+
+	// 5. Drop the retired columns, then the tenants table.
 	stale := [][2]string{
 		{"repositories", "tenant_id"},
 		{"users", "tenant_id"},
-		{"namespace_members", "tenant_id"},
 		{"package_owners", "tenant_id"},
 		{"merge_requests", "tenant_id"},
 	}
@@ -196,6 +241,19 @@ func (s *CentralStore) dropLegacyTenantColumns() error {
 		}
 		if err := s.d.gdb.Exec("ALTER TABLE " + table + " DROP COLUMN " + col).Error; err != nil {
 			return fmt.Errorf("drop legacy column %s.%s: %w", table, col, err)
+		}
+	}
+	// Retired ACL tables/table.
+	for _, t := range []string{"namespace_members", "branch_acl"} {
+		if s.d.gdb.Migrator().HasTable(t) {
+			if err := s.d.gdb.Migrator().DropTable(t); err != nil {
+				return fmt.Errorf("drop retired table %s: %w", t, err)
+			}
+		}
+	}
+	if hasTenants {
+		if err := s.d.gdb.Migrator().DropTable("tenants"); err != nil {
+			return fmt.Errorf("drop retired tenants table: %w", err)
 		}
 	}
 	return nil

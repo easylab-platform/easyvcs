@@ -18,20 +18,20 @@ func TestPackageClaimAndCrossUserRefusal(t *testing.T) {
 	alice, _ := s.CreateUser("alice", "Alice")
 	bob, _ := s.CreateUser("bob", "Bob")
 	claimFixture(t, s, alice.ID, "acme")
-	claimFixture(t, s, bob.ID, "acme")
+	claimFixture(t, s, bob.ID, "acme2")
 
 	ctx := t.Context()
 	// alice claims @acme/ui (she owns an acme namespace).
 	if err := s.AuthorizePublish(ctx, "npm", "@acme/ui", alice.ID); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	// bob has his own acme namespace, but the NAME is already claimed by alice.
+	// bob tries too; the NAME is already claimed by alice.
 	if err := s.AuthorizePublish(ctx, "npm", "@acme/ui", bob.ID); err == nil {
 		t.Fatal("cross-user publish must be refused")
 	}
 	// bob can claim a different name under his own scope.
-	if err := s.AuthorizePublish(ctx, "npm", "@acme/lib", bob.ID); err != nil {
-		t.Fatalf("bob claim @acme/lib: %v", err)
+	if err := s.AuthorizePublish(ctx, "npm", "@acme2/lib", bob.ID); err != nil {
+		t.Fatalf("bob claim @acme2/lib: %v", err)
 	}
 }
 

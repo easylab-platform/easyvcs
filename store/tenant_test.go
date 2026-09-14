@@ -19,9 +19,10 @@ func openTenantStore(t *testing.T) *CentralStore {
 	return s
 }
 
-// A user owns repositories only under namespaces it owns; two users may each
-// own an identically-named repo, and lookups never cross the boundary.
-func TestRepoIsolationAcrossUsers(t *testing.T) {
+// A user owns repositories under namespaces they own; namespaces are globally
+// unique, so two users cannot own the same namespace name. A second create of
+// the same namespace/name is rejected.
+func TestRepoNamespaceGlobalAndOwnerScoped(t *testing.T) {
 	s := openTenantStore(t)
 	alice, err := s.CreateUser("alice", "Alice")
 	if err != nil {
@@ -33,55 +34,48 @@ func TestRepoIsolationAcrossUsers(t *testing.T) {
 	}
 
 	a := RepoRef{Owner: alice.ID, Namespace: "platform", Name: "api"}
-	b := RepoRef{Owner: bob.ID, Namespace: "platform", Name: "api"}
-
 	if _, err := s.Create(a); err != nil {
 		t.Fatalf("create alice/platform/api: %v", err)
 	}
-	if _, err := s.Create(b); err != nil {
-		t.Fatalf("create bob/platform/api (same name, other owner): %v", err)
+	// bob cannot take the same namespace/name (global address).
+	if _, err := s.Create(RepoRef{Owner: bob.ID, Namespace: "platform", Name: "api"}); err == nil {
+		t.Fatal("duplicate namespace/name must be rejected")
 	}
-
-	// Owner-scoped refs resolve to the right repo.
-	gotA, err := s.OpenRepo(a)
-	if err != nil || gotA.OwnerUserID != alice.ID {
-		t.Fatalf("open alice ref: %v %+v", err, gotA)
+	// Repo owner is the namespace owner.
+	got, err := s.OpenRepo(RepoRef{Namespace: "platform", Name: "api"})
+	if err != nil || got.OwnerUserID != alice.ID {
+		t.Fatalf("open: %v %+v", err, got)
 	}
-	gotB, err := s.OpenRepo(b)
-	if err != nil || gotB.OwnerUserID != bob.ID {
-		t.Fatalf("open bob ref: %v %+v", err, gotB)
-	}
-
-	// Per-owner listing never leaks the other's repos.
+	// Per-owner listing reflects ownership.
 	listA, err := s.ListForOwner(alice.ID)
 	if err != nil || len(listA) != 1 {
 		t.Fatalf("alice repos = %+v (%v)", listA, err)
 	}
 	listB, err := s.ListForOwner(bob.ID)
-	if err != nil || len(listB) != 1 {
+	if err != nil || len(listB) != 0 {
 		t.Fatalf("bob repos = %+v (%v)", listB, err)
 	}
 }
 
-// Deleting one user's repo leaves the same-named repo of the other untouched.
+// Deleting one repo leaves a different-namespaced repo of another user intact.
 func TestDeleteIsOwnerScoped(t *testing.T) {
 	s := openTenantStore(t)
 	alice, _ := s.CreateUser("alice", "Alice")
 	bob, _ := s.CreateUser("bob", "Bob")
-	if _, err := s.Create(RepoRef{Owner: alice.ID, Namespace: "x", Name: "r"}); err != nil {
+	if _, err := s.Create(RepoRef{Owner: alice.ID, Namespace: "a", Name: "r"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Create(RepoRef{Owner: bob.ID, Namespace: "x", Name: "r"}); err != nil {
+	if _, err := s.Create(RepoRef{Owner: bob.ID, Namespace: "b", Name: "r"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Delete(RepoRef{Owner: alice.ID, Namespace: "x", Name: "r"}); err != nil {
+	if err := s.Delete(RepoRef{Namespace: "a", Name: "r"}); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := s.RepoExists(RepoRef{Owner: alice.ID, Namespace: "x", Name: "r"}); ok {
-		t.Fatal("alice copy should be gone")
+	if ok, _ := s.RepoExists(RepoRef{Namespace: "a", Name: "r"}); ok {
+		t.Fatal("a copy should be gone")
 	}
-	if ok, _ := s.RepoExists(RepoRef{Owner: bob.ID, Namespace: "x", Name: "r"}); !ok {
-		t.Fatal("bob copy must survive")
+	if ok, _ := s.RepoExists(RepoRef{Namespace: "b", Name: "r"}); !ok {
+		t.Fatal("b copy must survive")
 	}
 }
 
